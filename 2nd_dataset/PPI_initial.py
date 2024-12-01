@@ -43,9 +43,9 @@ df["protein2_length"] = df["protein_sequences_2"].str.len()
 def aa_comp(seq):
     return {aa: round(seq.count(aa) / len(seq) * 100, 3) for aa in amino_acids}
 
-# Calculate amino acid composition for both sequences
-    #df = pd.concat([df, df['protein_sequences_1'].apply(aa_comp).apply(pd.Series).add_prefix('p1_')], axis=1)
-    #df = pd.concat([df, df['protein_sequences_2'].apply(aa_comp).apply(pd.Series).add_prefix('p2_')], axis=1)
+Calculate amino acid composition for both sequences
+    df = pd.concat([df, df['protein_sequences_1'].apply(aa_comp).apply(pd.Series).add_prefix('p1_')], axis=1)
+    df = pd.concat([df, df['protein_sequences_2'].apply(aa_comp).apply(pd.Series).add_prefix('p2_')], axis=1)
 
 # Function to calculate protein properties
 def calculate_properties(seq):
@@ -82,11 +82,12 @@ X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.6, r
 
 # Define your models again if necessary, or reuse the models dictionary
 models = {
-    #"Support Vector Classifier": SVC(probability=True, random_state=42),     #0.59
-    #"Gradient Boosting": GradientBoostingClassifier(random_state=42),         #0.78
+    "Support Vector Classifier": SVC(probability=True, random_state=42),     #0.59
+    "Gradient Boosting": GradientBoostingClassifier(random_state=42),         #0.78
     "XGBoost": XGBClassifier( eval_metric='logloss', random_state=42),         #0.96
-    #"Neural Network": MLPClassifier(random_state=42),                          #0.55
-    "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42)  # 0.96
+    "Neural Network": MLPClassifier(random_state=42),                          #0.55   --  0.77
+    "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42)  # 0.96 + 0.02
+    #CNN                                                                            0.81
 }
 
 # Train and evaluate each model
