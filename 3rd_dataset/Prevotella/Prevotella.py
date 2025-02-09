@@ -2,7 +2,7 @@ import pandas as pd
 import os
 
 # File path to the FASTA file
-file_path = "C:/Users/Rafael Fonseca/Desktop/Mestrado/Ano2/ProjetoMestrado/code/data/proteome_data.fasta"
+file_path = "C:/Users/Rafael Fonseca/Desktop/Mestrado/Ano2/ProjetoMestrado/code/data/proteome5_data.fasta"
 
 # Function to parse the FASTA file
 def parse_fasta(file_path):
@@ -58,22 +58,29 @@ def parse_description(desc):
         details["Sequence Version"] = desc.split("SV=")[1].split(" ")[0]
     return details
 
-# Parse the FASTA file
-protein_df = parse_fasta(file_path)
+# Main script logic
+if os.path.exists(file_path):
+    # Parse the FASTA file
+    protein_df = parse_fasta(file_path)
 
-# If the DataFrame is empty, exit
-if protein_df.empty:
-    print("No data to process. Exiting.")
+    # If the DataFrame is empty, exit
+    if protein_df.empty:
+        print("No data to process. Exiting.")
+    else:
+        # Add parsed details to the DataFrame
+        parsed_details = protein_df["Description"].apply(parse_description)
+        details_df = pd.json_normalize(parsed_details).fillna("")
+
+        # Combine all relevant columns
+        full_protein_df = pd.concat([protein_df, details_df], axis=1)
+
+        # Filter proteins where Protein Existence (PE) is 1, 2, or 3
+        filtered_proteins = full_protein_df[full_protein_df["Protein Existence"].isin(["1", "2", "3"])]
+
+        # Save to a new CSV file
+        csv_output_path = "C:/Users/Rafael Fonseca/Desktop/Mestrado/Ano2/ProjetoMestrado/code/data/filtered_proteome5_data.csv"
+        filtered_proteins.to_csv(csv_output_path, index=False)
+
+        print(f"Filtered proteins saved to '{csv_output_path}'.")
 else:
-    # Add parsed details to the DataFrame
-    parsed_details = protein_df["Description"].apply(parse_description)
-    details_df = pd.json_normalize(parsed_details).fillna("")
-
-    # Combine all relevant columns
-    full_protein_df = pd.concat([protein_df, details_df], axis=1)
-
-    # Filter proteins where Protein Existence (PE) is 1, 2, or 3
-    filtered_proteins = full_protein_df[full_protein_df["Protein Existence"].isin(["1", "2", "3"])]
-
-    csv_output_path = "C:/Users/Rafael Fonseca/Desktop/Mestrado/Ano2/ProjetoMestrado/code/data/filtered_proteome_data.csv"
-    filtered_proteins.to_csv(csv_output_path, index=False)
+    print(f"File not found: {file_path}. Please check the path and try again.")

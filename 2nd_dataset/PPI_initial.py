@@ -86,7 +86,7 @@ models = {
     "Gradient Boosting": GradientBoostingClassifier(random_state=42),         #0.78
     "XGBoost": XGBClassifier( eval_metric='logloss', random_state=42),         #0.96
     "Neural Network": MLPClassifier(random_state=42),                          #0.55   --  0.77
-    "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42)  # 0.96 + 0.02
+    "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42)  # 0.96 -- 0.98
     #CNN                                                                            0.81
 }
 

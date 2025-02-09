@@ -1,0 +1,4 @@
+CNN Cross-Validation Accuracies: [1.0, 0.95, 1.0, 1.0]
+Mean CNN Accuracy: 0.9875
+MLP Cross-Validation Accuracies: [1.0, 0.95, 1.0, 1.0]
+Mean MLP Accuracy: 0.9875

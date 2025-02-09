@@ -56,7 +56,7 @@ X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_
 # Parameter grids for RandomizedSearchCV
 param_grids = {
     "XGBoost": {
-        'n_estimators': randint(50, 200),
+        'n_estimators': randint(50, 500),
         'max_depth': randint(3, 10),
         'learning_rate': uniform(0.01, 0.3),
         'subsample': uniform(0.6, 0.4),
