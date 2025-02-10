@@ -28,7 +28,7 @@ def augment_data_with_noise(data, target_size, noise_factor=0.01):
 
 df = pd.read_csv('data/medium_benchmark.csv')
 
-df_augmented = augment_data_with_noise(df, target_size=2000)
+df_augmented = augment_data_with_noise(df, target_size=500)
 
 df_augmented.to_csv('augmented_dataset.csv', index=False)
 
