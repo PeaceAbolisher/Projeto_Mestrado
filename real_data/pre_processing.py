@@ -10,8 +10,8 @@ healthy_dataset['healthy'] = 0
 all_data = pd.concat([diabetic_dataset, healthy_dataset], ignore_index=True)
 
 #droppar sample e nome cientifico
-if 'sample' in all_data.columns:
-    all_data = all_data.drop(columns=['sample'])
+columns_to_drop = ['sample', 'scientific_name']
+all_data = all_data.drop(columns=[col for col in columns_to_drop if col in all_data.columns])
 
 all_data.to_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\all_data_samples\all_data_samples.csv", index=False)
 
