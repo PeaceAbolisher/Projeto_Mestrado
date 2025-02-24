@@ -47,6 +47,13 @@ healthy_data_cleaned = healthy_data[healthy_data["ncbi_taxon_id"] != -1]
 num_negative_ones_cleaned = (healthy_data_cleaned["ncbi_taxon_id"] == -1).sum()
 print(f"Number of rows with ncbi_taxon_id = -1 after cleaning: {num_negative_ones_cleaned}")
 
+# Remove entries with 'Unknown' in the scientific_name column
+healthy_data_cleaned = healthy_data_cleaned[healthy_data_cleaned["scientific_name"] != "Unknown"]
+
+# Print the number of remaining rows
+print(f"Number of rows after removing 'Unknown': {len(healthy_data_cleaned)}")
+
+
 # Save the cleaned data
 cleaned_file_path = os.path.join(healthy_data_path, "cleaned_healthy_microbiome_data.csv")
 healthy_data_cleaned.to_csv(cleaned_file_path, index=False)
@@ -127,6 +134,12 @@ diabetic_data_cleaned = diabetic_data[diabetic_data["ncbi_taxon_id"] != -1]
 
 num_negative_ones_cleaned = (diabetic_data_cleaned["ncbi_taxon_id"] == -1).sum()
 print(f"Number of rows with ncbi_taxon_id = -1 after cleaning: {num_negative_ones_cleaned}")
+
+# Remove entries with 'Unknown' in the scientific_name column
+diabetic_data_cleaned = diabetic_data_cleaned[diabetic_data_cleaned["scientific_name"] != "Unknown"]
+
+# Print the number of remaining rows
+print(f"Number of rows after removing 'Unknown': {len(diabetic_data_cleaned)}")
 
 cleaned_file_path = os.path.join(diabetic_data_path, "cleaned_diabetic_microbiome_data.csv")
 diabetic_data_cleaned.to_csv(cleaned_file_path, index=False)
