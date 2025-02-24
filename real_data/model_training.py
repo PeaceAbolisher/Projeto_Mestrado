@@ -17,12 +17,12 @@ sys.stdout.reconfigure(encoding='utf-8')
 data = pd.read_csv(r"C:\\Users\\Rafael Fonseca\\Desktop\\Mestrado\\Ano2\\ProjetoMestrado\\parte_2\\data\\all_data_samples\\all_data_samples.csv", encoding="ISO-8859-1")
 
 #separar features dos targets
-X = data[['ncbi_taxon_id', 'scientific_name', 'relative_abundance']]
+X = data[['ncbi_taxon_id', 'relative_abundance']]
 y = data['healthy']
 
 #One-Hot Encode categorical columns
 encoder = OneHotEncoder()
-encoded_features = encoder.fit_transform(X[['ncbi_taxon_id', 'scientific_name']]).toarray()   #features: 2^14
+encoded_features = encoder.fit_transform(X[['ncbi_taxon_id']]).toarray()   #features: 2^14
 
 X_combined = np.hstack((encoded_features, X[['relative_abundance']].values))
 
