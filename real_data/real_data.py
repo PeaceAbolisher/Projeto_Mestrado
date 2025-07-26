@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from scipy import stats
 import warnings
 
-healthy_data_path = r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\healthy_samples"
+healthy_data_path = r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\Project1\healthy_samples"
 
 healthy_data = pd.DataFrame()
 
@@ -99,7 +99,7 @@ for i, v in enumerate(top_50_count['count']):
 plt.show()
 
 #------------------------------------------------------- DIABETIC ------------------------------------------------------------
-diabetic_data_path = r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\diabetic_samples"
+diabetic_data_path = r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\Project1\diabetic_samples"
 
 diabetic_data = pd.DataFrame()
 
