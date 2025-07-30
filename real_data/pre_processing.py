@@ -4,8 +4,8 @@ diabetic_dataset = pd.read_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\P
 healthy_dataset = pd.read_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\healthy_samples\cleaned_healthy_microbiome_data.csv")
 
 # Add labels
-diabetic_dataset['healthy'] = 1
-healthy_dataset['healthy'] = 0
+diabetic_dataset['healthy'] = 0
+healthy_dataset['healthy'] = 1
 
 all_data = pd.concat([diabetic_dataset, healthy_dataset], ignore_index=True)
 
