@@ -2,24 +2,25 @@
 import numpy as np
 import pandas as pd
 import joblib
+import tensorflow as tf
 import copy
-import ast
 from sdv.metadata import SingleTableMetadata
 from sdv.single_table import CTGANSynthesizer
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import (
     RandomForestClassifier, GradientBoostingClassifier,
     VotingClassifier, StackingClassifier
 )
-from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score
+from sklearn.metrics import roc_auc_score, confusion_matrix, f1_score
 from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler,MinMaxScaler, OneHotEncoder
-from sklearn.feature_selection import SelectKBest, mutual_info_classif, RFE, RFECV
-from sklearn.utils import resample
+from sklearn.feature_selection import SelectKBest, mutual_info_classif, RFECV
 from sklearn.base import clone
 from xgboost import XGBClassifier
+import seaborn as sns
 from itertools import combinations
 from scikeras.wrappers import KerasClassifier
 from tensorflow.keras import Input
@@ -38,7 +39,7 @@ def create_mlp_model(input_dim=20, hidden_layers=[64, 32], dropout_rate=0.2, lea
         model.add(Dropout(dropout_rate))
 
     model.add(Dense(1, activation='sigmoid'))
-    model.compile(optimizer=Adam(learning_rate=learning_rate), loss='binary_crossentropy', metrics=['accuracy', 'AUC']) #logs acc and auc
+    model.compile(optimizer=Adam(learning_rate=learning_rate),loss='binary_crossentropy',metrics=[tf.keras.metrics.AUC(name='auc')]) #uses AUC as the only reliable training metric (there is no f1-score metric built in)
     return model
 
 
@@ -78,7 +79,6 @@ scalers = {
 
 
 selection_methods = ['kbest', 'rfe']
-final_results = {}
 best_estimators_final = {}
 
 rfe_base_models = {
@@ -166,8 +166,6 @@ y_train = train_df['healthy']
 encoder = OneHotEncoder(handle_unknown='ignore')
 encoder.fit(X_train[['Country']])
 
-
-best_val_accuracy_so_far = 0.0
 best_performers = {}
 
 for scaler_name, scaler in scalers.items():
@@ -186,13 +184,6 @@ for scaler_name, scaler in scalers.items():
         pd.DataFrame(X_train_scaled, columns=X_train_num.columns),
         pd.DataFrame(X_train_cat, columns=encoder.get_feature_names_out(['Country']))
     ], axis=1).astype(np.float32)
-
-    # Add MLP model now that input size is known
-    models['mlp'] = KerasClassifier(
-    model=create_mlp_model,
-    model__input_dim=X_train_processed.shape[1],  # use `model__` here!
-    verbose=0
-)
 
     # --- Preprocess Validation Set ---
     X_val_num = X_val.drop(columns=['Country'])
@@ -256,44 +247,61 @@ for scaler_name, scaler in scalers.items():
 
             # --- Filter training data to include only selected features ---
             # These are the features selected by either RFE or KBest (depending on the current loop)
-            X_train_subset = X_train_processed[selected_features]
+            X_train_selected = X_train_processed[selected_features]
+            X_val_selected = X_val_processed[selected_features]
+
+
+            # --- MLP requires fixed-size input vectors so adding it at the beginning of the code (before capping it to 20) would lead to shape mismatch and a poorly trained model---
+            models['mlp'] = KerasClassifier(
+            model=create_mlp_model,
+            model__input_dim=X_train_selected.shape[1], #number of features
+            verbose=0)
 
             # --- Train base models with GridSearchCV and store best estimators ---
             best_estimators = {}
             single_results = {}
             for name, model in models.items():
                 print(f"Training model: {name.upper()} with GridSearchCV")
+                grid_params = copy.deepcopy(param_grids[name])  #deep copy to avoid UNINTENTIONAL changes to original param_grids dictionary during gridSearch loop
+                #some models like MLP require modifying the parameters before training and thus future runs would use corrupted or modified grids.
 
-                #Fix input size mismatch for MLP -->prevents missmatch
+                #Preventing missmatch by changing the param grids, of this run, instead of globally
                 if name == 'mlp':
-                  param_grids['mlp']['model__input_dim'] = [X_train_subset.shape[1]]
+                    grid_params['model__input_dim'] = [X_train_selected.shape[1]]
 
                 grid = GridSearchCV(
                     estimator=model,
-                    param_grid=param_grids[name],
+                    param_grid=grid_params, #uses the deep_copied params
                     cv=3,
                     scoring='roc_auc',
                     n_jobs=-1
                 )
-                grid.fit(X_train_subset, y_train)
+                grid.fit(X_train_selected, y_train)
 
                 #evaluates base models on validation set
-                X_val_subset = X_val_processed[selected_features]
-                y_val_pred = grid.predict(X_val_subset)
-                val_acc = accuracy_score(y_val, y_val_pred)
+                y_val_pred = grid.predict(X_val_selected)
+                val_f1 = f1_score(y_val, y_val_pred)
                 val_auc = None
                 if hasattr(grid, "predict_proba"):
-                    y_val_proba = grid.predict_proba(X_val_subset)[:, 1]
-                    val_auc = roc_auc_score(y_val, y_val_proba)
+                    val_pred_proba = grid.predict_proba(X_val_selected)[:, 1]
+                    try:
+                        val_auc = roc_auc_score(y_val, val_pred_proba)
+                    except ValueError:
+                        val_auc = None
+
 
                 label = f"Single-{name}"
-                single_results[label] = (val_acc, val_auc)
-
+                single_results[label] = {
+                    'val_auc': val_auc,
+                    'val_f1': val_f1,
+                    'model': grid.best_estimator_
+                }
                 best_estimators[name] = grid.best_estimator_
-                print(f"Best {name.upper()} | Val AUC: {f'{val_auc:.3f}' if val_auc is not None else 'N/A'} | CV Accuracy: {grid.best_score_:.3f}")
+                print(f"Best {name.upper()} | Val AUC: {f'{val_auc:.3f}' if val_auc is not None else 'N/A'} | Val F1-SCORE: {val_f1:.3f}")
 
-           # --- Build Voting and Stacking Ensembles using all base models ---
-            model_names = [name for name in best_estimators.keys() if name != 'mlp'] #leave MLP outside of ensemble due to small dataset and computational strain... not worth it
+            # --- Build Voting and Stacking Ensembles using all base models, besides MLP ---
+            #leave MLP outside of ensemble due to small dataset and computational strain...
+            model_names = [name for name in best_estimators.keys() if name != 'mlp'] 
 
             voting_results = {}
             stacking_results = {}
@@ -302,7 +310,6 @@ for scaler_name, scaler in scalers.items():
             for i in range(2, len(model_names) + 1):
                 for combo in combinations(model_names, i):
                     estimators = [(name, best_estimators[name]) for name in combo]
-
                     # --- Try both hard and soft voting ---
                     for voting_type in ['hard', 'soft']:
                         try:
@@ -310,18 +317,24 @@ for scaler_name, scaler in scalers.items():
                                 estimators=estimators,
                                 voting=voting_type
                             )
-                            voting_model.fit(X_train_subset, y_train)
-                            X_val_subset = X_val_processed[selected_features]
-                            y_pred = voting_model.predict(X_val_subset)
-                            acc = accuracy_score(y_val, y_pred) #calculates acc on validation set
-                            auc = None
+                            voting_model.fit(X_train_selected, y_train)
+                            y_pred = voting_model.predict(X_val_selected)
+                            val_f1 = f1_score(y_val, y_pred)
+                            val_auc = None
                             if hasattr(voting_model, "predict_proba"):
-                                y_proba = voting_model.predict_proba(X_val_subset)[:, 1] #gets probability of class 1
-                                auc = roc_auc_score(y_val, y_proba) #computes auc on val set
+                                val_pred_proba = voting_model.predict_proba(X_val_selected)[:, 1]
+                                try:
+                                    val_auc = roc_auc_score(y_val, val_pred_proba)
+                                except ValueError:
+                                    val_auc = None
 
                             label = f"Voting-{voting_type}-{combo}"
-                            voting_results[label] = (acc, auc) #saves acc and auc
-                            print(f"{label} | AUC: {f'{auc:.3f}' if auc is not None else 'N/A'} | ACC: {acc:.3f} ")
+                            voting_results[label] = {
+                                'val_auc': val_auc,
+                                'val_f1': val_f1,
+                                'model': voting_model
+                            }
+                            print(f"{label} | Val AUC: {f'{val_auc:.3f}' if val_auc is not None else 'N/A'} | Val F1-SCORE: {val_f1:.3f} ")
                         except Exception:
                             continue  # Some combos may fail (e.g., soft voting needs predict_proba)
 
@@ -335,84 +348,79 @@ for scaler_name, scaler in scalers.items():
                               cv=3,
                               n_jobs=-1
                           )
-                          stacking_model.fit(X_train_subset, y_train)
-                          y_pred = stacking_model.predict(X_val_processed[selected_features])
-                          acc = accuracy_score(y_val, y_pred)
-                          auc = None
+                          stacking_model.fit(X_train_selected, y_train)
+                          y_pred = stacking_model.predict(X_val_selected)
+                          val_f1 = f1_score(y_val, y_pred)
+                          val_auc = None
                           if hasattr(stacking_model, "predict_proba"):
-                              y_proba = stacking_model.predict_proba(X_val_processed[selected_features])[:, 1]
-                              auc = roc_auc_score(y_val, y_proba)
+                            val_pred_proba =  stacking_model.predict_proba(X_val_selected)[:, 1]
+                            try:
+                                val_auc = roc_auc_score(y_val, val_pred_proba) 
+                            except ValueError:
+                                val_auc = None
 
                           label = f"Stacking-{meta_name}-{combo}"
-                          stacking_results[label] = (acc, auc)
-                          print(f"{label} | AUC:{f'{auc:.3f}' if auc is not None else 'N/A'} | ACC: {acc:.3f} ")
+                          stacking_results[label] = {
+                                'val_auc': val_auc,
+                                'val_f1': val_f1,
+                                'model': stacking_model
+                            }
+
+                          print(f"{label} | Val AUC: {f'{val_auc:.3f}' if val_auc is not None else 'N/A'} | Val F1-SCORE: {val_f1:.3f} ")
                         except Exception:
                             continue
 
             # --- Track the best performing ensemble for this configuration ---
             all_results = {**single_results, **voting_results, **stacking_results}
             if all_results:
+                def safe_auc_key(label):
+                    metrics = all_results[label]
+                    auc = metrics.get('val_auc', -1)
+                    f1 = metrics.get('val_f1', -1)
+                    return (auc if auc is not None else -1, f1)
 
-                def safe_auc_key(item):
-                  acc, auc = all_results[item]
-                  # If AUC is None, treat it as -1 so it sorts lower
-                  return (auc if auc is not None else -1, acc)
 
-                best_label = max(all_results, key=safe_auc_key) #function that handles the fact that AUC can be none, treating it as -1
+                best_label = max(all_results, key=safe_auc_key)
+
                 result_key = f"ctgan-{scaler_name}-{method}-{base_name}-{best_label}"
-                final_results[result_key] = all_results[best_label][0]  #picks the best model and extracts only the acc
-                val_acc, val_auc = all_results[best_label]
-                print(f"Candidate best: {result_key} | AUC: {val_auc:.3f} | Accuracy: {val_acc:.3f}")
+                val_auc = all_results[best_label].get('val_auc', -1)
+                val_f1 = all_results[best_label].get('val_f1', -1)
+                print(f"Candidate best: {result_key} | Val AUC: {val_auc:.3f} | Val F1-score: {val_f1:.3f}")
 
-
-                # Deep copy model and selector for best config
-                                  #model_copy = voting_model if 'Voting' in best_label else stacking_model
                 selector_copy = selector_obj if method == 'kbest' and selector_obj is not None else None
 
-                # Save pipeline only if it's the best so far
-                current_val_acc, current_val_auc = all_results[best_label]
+                model_copy = all_results[best_label]['model']
 
-                # Always store this model if it reaches best accuracy seen so far
-                if current_val_acc > best_val_accuracy_so_far:
-                    best_performers.clear()  # Clear previous lower performers
-                    best_val_accuracy_so_far = current_val_acc
+                # Prepare partial pipeline (test_eval done later)
+                best_performers[result_key] = {
+                    'pipeline': {
+                        'model': model_copy,
+                        'scaler': copy.deepcopy(scaler),
+                        'selector': selector_copy,
+                        'encoder': copy.deepcopy(encoder),
+                        'feature_method': method,
+                        'base_model': base_name,
+                        'k': k,
+                        'label': best_label,
+                        'pre_selection_feature_names': list(X_train_processed.columns),
+                        'final_feature_names': list(selected_features),
+                        'scaler_type': scaler_name,
+                        'balancing_method': 'gan_ctgan',
+                        'val_auc': val_auc,
+                        'val_f1': val_f1,
+                        'augmentation': None
+                    },
+                }
 
-                if current_val_acc == best_val_accuracy_so_far:
-                    # Copy model and selector safely
-                    model_copy = voting_model if 'Voting' in best_label else stacking_model
-                    selector_copy = selector_obj if method == 'kbest' and selector_obj is not None else None
-
-                    # Prepare partial pipeline (test_eval done later)
-                    best_performers[result_key] = {
-                        'pipeline': {
-                            'model': model_copy,
-                            'scaler': copy.deepcopy(scaler),
-                            'selector': selector_copy,
-                            'encoder': copy.deepcopy(encoder),
-                            'feature_method': method,
-                            'base_model': base_name,
-                            'k': k,
-                            'label': best_label,
-                            'pre_selection_feature_names': list(X_train_processed.columns),
-                            'final_feature_names': list(selected_features).copy(),
-                            'scaler_type': scaler_name,
-                            'balancing_method': 'gan_ctgan',
-                            'val_accuracy': current_val_acc,
-                            'val_auc': current_val_auc,
-                            'augmentation': None
-                        },
-                        'val_accuracy': current_val_acc  # we'll add test acc/AUC later
-                    }
-
-#select based on validation acc and auc
+#select based on validation auc and f1-score
 sorted_models = sorted(
     best_performers.items(),
     key=lambda x: (
-        -1 if x[1]['pipeline'].get('val_auc') is None else -x[1]['pipeline']['val_auc'], #sorts models from highest AUC to lowest
-        -x[1]['pipeline']['val_accuracy'] #use the validation acc negated, so that higher values come first. tiebreaker also, if 2 models have the same AUC, highest val acc comes first
+        -1 if x[1]['pipeline'].get('val_auc') is None else -x[1]['pipeline']['val_auc'],
+        -x[1]['pipeline'].get('val_f1', -1)
     )
 )
-best_model_name, best_entry = sorted_models[0] #selecting the best model based on AUC first and then on acc
+best_model_name, best_entry = sorted_models[0] #selecting the best model based on AUC first and then on F1-SCORE
 best_model_pipeline = best_entry['pipeline']
 
 # === Evaluate Final Model on Test Set ===
@@ -432,38 +440,44 @@ X_test_proc = pd.concat([
 ], axis=1).astype(np.float32)
 
 # Feature selection for test set
-if selector is not None:
-    X_test_final = pd.DataFrame(selector.transform(X_test_proc), columns=features)
-else:
-    X_test_final = X_test_proc[features]
+X_test_final = X_test_proc.loc[:, features] #Select columns by label (not by implicit index order) and The column order matches exactly what was used in training
 
 # Predict
-y_test_pred = model.predict(X_test_final)
-true_test_accuracy = accuracy_score(y_test, y_test_pred)
+test_pred = model.predict(X_test_final)
+test_f1 = f1_score(y_test, test_pred)
+
 test_auc = None
+test_pred_proba = None
 if hasattr(model, "predict_proba"):
-    y_proba = model.predict_proba(X_test_final)[:, 1]
-    test_auc = roc_auc_score(y_test, y_proba)
+    test_pred_proba = model.predict_proba(X_test_final)[:, 1]
+    try:
+        test_auc = roc_auc_score(y_test, test_pred_proba)
+    except ValueError:
+        test_auc = None
+
 
 # Print summary
 print("\n[INFO] FINAL MODEL SUMMARY")
 print("=" * 40)
 print(f"[INFO] Best Config        : {best_model_name}")
-print(f"Validation Accuracy: {best_entry['pipeline']['val_accuracy']:.3f}")
-print(f"Validation AUC: {best_entry['pipeline']['val_auc']:.3f}")
-print(f"Test Accuracy      : {true_test_accuracy:.3f}")
+print(f"Validation F1-score: {best_model_pipeline['val_f1']:.3f}")
+print(f"Validation AUC: {best_model_pipeline['val_auc']:.3f}")
+print(f"Test F1-score      : {test_f1:.3f}")
 if test_auc is not None:
     print(f"Test AUC           : {test_auc:.3f}")
 print("Model saved to     : 'best_model_gans.pkl'")
 print("=" * 40)
 
 # Confusion matrix
-cm = confusion_matrix(y_test, y_test_pred)
-cm_df = pd.DataFrame(cm, index=["Actual 0", "Actual 1"], columns=["Predicted 0", "Predicted 1"])
-print("\n[INFO] Confusion Matrix:")
-print(cm_df)
+cm = confusion_matrix(y_test, test_pred)
+cm_df = pd.DataFrame(cm, index=["Actual Diabetic", "Actual Healthy"], columns=["Predicted Diabetic", "Predicted Healthy"])
+sns.heatmap(cm_df, annot=True, fmt="d", cmap="Blues")
+plt.title("Confusion Matrix")
+plt.ylabel("Actual")
+plt.xlabel("Predicted")
+plt.show()
 
 # Save
-best_model_pipeline['test_accuracy'] = true_test_accuracy
 best_model_pipeline['test_auc'] = test_auc
+best_model_pipeline['test_f1'] = test_f1
 joblib.dump(best_model_pipeline, 'best_model_gans.pkl')

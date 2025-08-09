@@ -1,20 +1,18 @@
-# GANS Class Balancing
+# RANDOM UPSAMPLING Class Balancing
 import numpy as np
 import pandas as pd
 import joblib
+import tensorflow as tf
 import copy
 from sdv.metadata import SingleTableMetadata
-from sdv.single_table import CTGANSynthesizer
+import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import precision_score, recall_score, f1_score, average_precision_score
 from sklearn.ensemble import (
     RandomForestClassifier, GradientBoostingClassifier,
     VotingClassifier, StackingClassifier
 )
-from sklearn.metrics import roc_auc_score, confusion_matrix, accuracy_score
+from sklearn.metrics import roc_auc_score, confusion_matrix, f1_score
 from sklearn.svm import SVC
-from sklearn.metrics import precision_recall_curve
-import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler,MinMaxScaler, OneHotEncoder
@@ -22,12 +20,14 @@ from sklearn.feature_selection import SelectKBest, mutual_info_classif, RFECV
 from sklearn.base import clone
 from xgboost import XGBClassifier
 import seaborn as sns
+from sklearn.utils import resample
 from itertools import combinations
 from scikeras.wrappers import KerasClassifier
 from tensorflow.keras import Input
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.optimizers import Adam
+
 
 def create_mlp_model(input_dim=20, hidden_layers=[64, 32], dropout_rate=0.2, learning_rate=0.001):
     model = Sequential()
@@ -40,11 +40,11 @@ def create_mlp_model(input_dim=20, hidden_layers=[64, 32], dropout_rate=0.2, lea
         model.add(Dropout(dropout_rate))
 
     model.add(Dense(1, activation='sigmoid'))
-    model.compile(optimizer=Adam(learning_rate=learning_rate), loss='binary_crossentropy', metrics=['accuracy', 'AUC']) #logs acc and auc
+    model.compile(optimizer=Adam(learning_rate=learning_rate),loss='binary_crossentropy',metrics=[tf.keras.metrics.AUC(name='auc')]) #uses AUC as the only reliable training metric (there is no f1-score metric built in)
     return model
 
 
-print("\n[INFO] Starting GANS-Balanced Model Selection Pipeline...\n")
+print("\n[INFO] Starting Random Upsampling-Balanced Model Selection Pipeline...\n")
 # --- Model Setup ---
 models = {
     'rf': RandomForestClassifier(),
@@ -122,43 +122,37 @@ X_train, X_val, y_train, y_val = train_test_split(
 )
 
 
-#--- Apply GAN (CTGAN) to balance the training set only ---
+# --- Apply RANDOM UPSAMPLING to balance the training set only ---
 
-#balances on training data ONLY
+#Recombine X_train and y_train into one DataFrame for clarity
+# --- Recombine X_train and y_train for upsampling ---
 train_df = X_train.copy()
 train_df['healthy'] = y_train
 
-# Identify class imbalance
-minority_class = train_df['healthy'].value_counts().idxmin()
-majority_class = train_df['healthy'].value_counts().idxmax()
-samples_needed = train_df['healthy'].value_counts()[majority_class] - train_df['healthy'].value_counts()[minority_class]
+# --- Apply RANDOM UPSAMPLING to balance the training set only ---
 
-# Generate synthetic samples only if needed
-if samples_needed > 0:
-    # Subset of minority class only
-    minority_df = train_df[train_df['healthy'] == minority_class].copy()
+# Separate majority and minority classes
+df_majority = train_df[train_df['healthy'] == 0]
+df_minority = train_df[train_df['healthy'] == 1]
 
-    # Define metadata schema for CTGAN
-    metadata = SingleTableMetadata()
-    metadata.detect_from_dataframe(minority_df)
+# Upsample minority class
+df_minority_upsampled = resample(
+    df_minority,
+    replace=True,                  # sample with replacement
+    n_samples=len(df_majority),    # match majority class
+    random_state=42
+)
 
-    for column in minority_df.columns:
-        if column not in ['Country', 'healthy', 'Age']:
-            metadata.update_column(column_name=column, sdtype='numerical')
-    metadata.update_column(column_name='Age', sdtype='numerical')
-    metadata.update_column(column_name='Country', sdtype='categorical')
+# Combine majority and upsampled minority
+train_df_upsampled = pd.concat([df_majority, df_minority_upsampled])
 
-    # Fit CTGAN to minority data and sample to balance
-    synthesizer = CTGANSynthesizer(metadata, epochs=300)
-    synthesizer.fit(minority_df)
-    synthetic_df = synthesizer.sample(samples_needed)
+# Shuffle the resulting DataFrame
+train_df_upsampled = train_df_upsampled.sample(frac=1, random_state=42).reset_index(drop=True)
 
-    # Combine real and synthetic into a balanced training set
-    train_df = pd.concat([train_df, synthetic_df], ignore_index=True)
+# Re-separate features and target
+X_train = train_df_upsampled.drop(columns=['healthy'])
+y_train = train_df_upsampled['healthy']
 
-# Update training X and y with balanced data
-X_train = train_df.drop(columns=['healthy'])
-y_train = train_df['healthy']
 
 
 # --- Encode and scale data using both scalers (standard, minmax) ---
@@ -166,7 +160,6 @@ y_train = train_df['healthy']
 # Fit encoder on training data
 encoder = OneHotEncoder(handle_unknown='ignore')
 encoder.fit(X_train[['Country']])
-
 
 best_performers = {}
 
@@ -252,23 +245,24 @@ for scaler_name, scaler in scalers.items():
             X_train_selected = X_train_processed[selected_features]
             X_val_selected = X_val_processed[selected_features]
 
-            # --- Add MLP model now that input size is known ---
+
+            # --- MLP requires fixed-size input vectors so adding it at the beginning of the code (before capping it to 20) would lead to shape mismatch and a poorly trained model---
             models['mlp'] = KerasClassifier(
-                model=create_mlp_model,
-                model__input_dim=X_train_selected.shape[1],
-                verbose=0
-            )
+            model=create_mlp_model,
+            model__input_dim=X_train_selected.shape[1], #number of features
+            verbose=0)
 
             # --- Train base models with GridSearchCV and store best estimators ---
             best_estimators = {}
             single_results = {}
             for name, model in models.items():
                 print(f"Training model: {name.upper()} with GridSearchCV")
+                grid_params = copy.deepcopy(param_grids[name])  #deep copy to avoid UNINTENTIONAL changes to original param_grids dictionary during gridSearch loop
+                #some models like MLP require modifying the parameters before training and thus future runs would use corrupted or modified grids.
 
-                grid_params = copy.deepcopy(param_grids[name]) 
-                #Fix input size mismatch for MLP -->prevents missmatch
+                #Preventing missmatch by changing the param grids, of this run, instead of globally
                 if name == 'mlp':
-                    grid_params['model__input_dim'] = [X_train_selected.shape[1]] #only changing the local grid for that run, instead of changing it globally
+                    grid_params['model__input_dim'] = [X_train_selected.shape[1]]
 
                 grid = GridSearchCV(
                     estimator=model,
@@ -281,40 +275,28 @@ for scaler_name, scaler in scalers.items():
 
                 #evaluates base models on validation set
                 y_val_pred = grid.predict(X_val_selected)
-                val_auc = None
-                val_precision = precision_score(y_val, y_val_pred)
-                val_recall = recall_score(y_val, y_val_pred)
                 val_f1 = f1_score(y_val, y_val_pred)
+                val_auc = None
                 if hasattr(grid, "predict_proba"):
-                    y_val_proba = grid.predict_proba(X_val_selected)[:, 1]
+                    val_pred_proba = grid.predict_proba(X_val_selected)[:, 1]
                     try:
-                        val_auc = roc_auc_score(y_val, y_val_proba)
+                        val_auc = roc_auc_score(y_val, val_pred_proba)
                     except ValueError:
                         val_auc = None
 
 
                 label = f"Single-{name}"
                 single_results[label] = {
-                    'auc': val_auc,
-                    'precision': val_precision,
-                    'recall': val_recall,
-                    'f1': val_f1,
+                    'val_auc': val_auc,
+                    'val_f1': val_f1,
                     'model': grid.best_estimator_
                 }
-
-
                 best_estimators[name] = grid.best_estimator_
-                print(
-                    f"Best {name.upper()} | "
-                    f"Recall: {val_recall:.3f} | "
-                    f"Precision: {val_precision:.3f} | "
-                    f"F1: {val_f1:.3f} | "
-                    f"AUC: {f'{val_auc:.3f}' if val_auc is not None else 'N/A'}"
-                )
+                print(f"Best {name.upper()} | Val AUC: {f'{val_auc:.3f}' if val_auc is not None else 'N/A'} | Val F1-SCORE: {val_f1:.3f}")
 
-
-           # --- Build Voting and Stacking Ensembles using all base models ---
-            model_names = [name for name in best_estimators.keys() if name != 'mlp'] #leave MLP outside of ensemble due to small dataset and computational strain... not worth it
+            # --- Build Voting and Stacking Ensembles using all base models, besides MLP ---
+            #leave MLP outside of ensemble due to small dataset and computational strain...
+            model_names = [name for name in best_estimators.keys() if name != 'mlp'] 
 
             voting_results = {}
             stacking_results = {}
@@ -323,7 +305,6 @@ for scaler_name, scaler in scalers.items():
             for i in range(2, len(model_names) + 1):
                 for combo in combinations(model_names, i):
                     estimators = [(name, best_estimators[name]) for name in combo]
-
                     # --- Try both hard and soft voting ---
                     for voting_type in ['hard', 'soft']:
                         try:
@@ -333,31 +314,22 @@ for scaler_name, scaler in scalers.items():
                             )
                             voting_model.fit(X_train_selected, y_train)
                             y_pred = voting_model.predict(X_val_selected)
+                            val_f1 = f1_score(y_val, y_pred)
                             val_auc = None
                             if hasattr(voting_model, "predict_proba"):
-                                y_val_proba = voting_model.predict_proba(X_val_selected)[:, 1]
+                                val_pred_proba = voting_model.predict_proba(X_val_selected)[:, 1]
                                 try:
-                                    val_auc = roc_auc_score(y_val, y_val_proba)
+                                    val_auc = roc_auc_score(y_val, val_pred_proba)
                                 except ValueError:
                                     val_auc = None
 
-
                             label = f"Voting-{voting_type}-{combo}"
                             voting_results[label] = {
-                                'auc': val_auc,
-                                'precision': precision_score(y_val, y_pred),
-                                'recall': recall_score(y_val, y_pred),
-                                'f1': f1_score(y_val, y_pred),
+                                'val_auc': val_auc,
+                                'val_f1': val_f1,
                                 'model': voting_model
                             }
-                            print(
-                                f"{label} | "
-                                f"Recall: {recall_score(y_val, y_pred):.3f} | "
-                                f"Precision: {precision_score(y_val, y_pred):.3f} | "
-                                f"F1: {f1_score(y_val, y_pred):.3f} | "
-                                f"AUC: {f'{val_auc:.3f}' if val_auc is not None else 'N/A'} |"
-                            )
-
+                            print(f"{label} | Val AUC: {f'{val_auc:.3f}' if val_auc is not None else 'N/A'} | Val F1-SCORE: {val_f1:.3f} ")
                         except Exception:
                             continue  # Some combos may fail (e.g., soft voting needs predict_proba)
 
@@ -373,52 +345,43 @@ for scaler_name, scaler in scalers.items():
                           )
                           stacking_model.fit(X_train_selected, y_train)
                           y_pred = stacking_model.predict(X_val_selected)
+                          val_f1 = f1_score(y_val, y_pred)
                           val_auc = None
                           if hasattr(stacking_model, "predict_proba"):
-                            y_val_proba =  stacking_model.predict_proba(X_val_selected)[:, 1]
+                            val_pred_proba =  stacking_model.predict_proba(X_val_selected)[:, 1]
                             try:
-                                val_auc = roc_auc_score(y_val, y_val_proba) 
+                                val_auc = roc_auc_score(y_val, val_pred_proba) 
                             except ValueError:
                                 val_auc = None
 
-
                           label = f"Stacking-{meta_name}-{combo}"
                           stacking_results[label] = {
-                            'auc': val_auc,
-                            'precision': precision_score(y_val, y_pred),
-                            'recall': recall_score(y_val, y_pred),
-                            'f1': f1_score(y_val, y_pred),
-                            'model': stacking_model
+                                'val_auc': val_auc,
+                                'val_f1': val_f1,
+                                'model': stacking_model
+                            }
 
-                        }
-                          print(
-                            f"{label} | "
-                            f"Recall: {recall_score(y_val, y_pred):.3f} | "
-                            f"Precision: {precision_score(y_val, y_pred):.3f} | "
-                            f"F1: {f1_score(y_val, y_pred):.3f} | "
-                           f"AUC: {f'{val_auc:.3f}' if val_auc is not None else 'N/A'} |"
-                        )
+                          print(f"{label} | Val AUC: {f'{val_auc:.3f}' if val_auc is not None else 'N/A'} | Val F1-SCORE: {val_f1:.3f} ")
                         except Exception:
                             continue
 
             # --- Track the best performing ensemble for this configuration ---
             all_results = {**single_results, **voting_results, **stacking_results}
             if all_results:
+                def safe_auc_key(label):
+                    metrics = all_results[label]
+                    auc = metrics.get('val_auc', -1)
+                    f1 = metrics.get('val_f1', -1)
+                    return (auc if auc is not None else -1, f1)
 
-                def safe_recall_key(item):
-                    metrics = all_results[item]
-                    recall = metrics.get('recall', -1)
-                    precision = metrics.get('precision', -1)
-                    f1 = metrics.get('f1', -1)
-                    return (recall, precision, f1)
-                best_label = max(all_results, key=safe_recall_key)
+
+                best_label = max(all_results, key=safe_auc_key)
 
                 result_key = f"ctgan-{scaler_name}-{method}-{base_name}-{best_label}"
-                val_auc = all_results[best_label].get('auc', -1)
+                val_auc = all_results[best_label].get('val_auc', -1)
+                val_f1 = all_results[best_label].get('val_f1', -1)
+                print(f"Candidate best: {result_key} | Val AUC: {val_auc:.3f} | Val F1-score: {val_f1:.3f}")
 
-                print(f"Candidate best: {result_key} | "f"Recall: {all_results[best_label]['recall']:.3f} | "f"Precision: {all_results[best_label]['precision']:.3f} | "f"F1: {all_results[best_label]['f1']:.3f}" )
-
-                # Deep copy model and selector for best config
                 selector_copy = selector_obj if method == 'kbest' and selector_obj is not None else None
 
                 model_copy = all_results[best_label]['model']
@@ -437,26 +400,22 @@ for scaler_name, scaler in scalers.items():
                         'pre_selection_feature_names': list(X_train_processed.columns),
                         'final_feature_names': list(selected_features),
                         'scaler_type': scaler_name,
-                        'balancing_method': 'gan_ctgan',
+                        'balancing_method': 'upsampling',
                         'val_auc': val_auc,
-                        'val_precision': all_results[best_label]['precision'],
-                        'val_recall': all_results[best_label]['recall'],
-                        'val_f1': all_results[best_label]['f1'],
+                        'val_f1': val_f1,
                         'augmentation': None
                     },
                 }
 
-#select based on validation recall, precision and f1_score
+#select based on validation auc and f1-score
 sorted_models = sorted(
     best_performers.items(),
     key=lambda x: (
-        -x[1]['pipeline'].get('val_recall', -1),
-        -x[1]['pipeline'].get('val_precision', -1),
+        -1 if x[1]['pipeline'].get('val_auc') is None else -x[1]['pipeline']['val_auc'],
         -x[1]['pipeline'].get('val_f1', -1)
     )
 )
-
-best_model_name, best_entry = sorted_models[0]  # selecting best model based on recall → precision → F1
+best_model_name, best_entry = sorted_models[0] #selecting the best model based on AUC first and then on F1-SCORE
 best_model_pipeline = best_entry['pipeline']
 
 # === Evaluate Final Model on Test Set ===
@@ -476,69 +435,44 @@ X_test_proc = pd.concat([
 ], axis=1).astype(np.float32)
 
 # Feature selection for test set
-if selector is not None:
-    X_test_final = X_test_proc.loc[:, selector.get_support()] #Slelect the actual columns kept by the selector, in the right order
-else:
-    X_test_final = X_test_proc[features]
+X_test_final = X_test_proc.loc[:, features] #Select columns by label (not by implicit index order) and The column order matches exactly what was used in training
 
 # Predict
-y_test_pred = model.predict(X_test_final)
-true_test_accuracy = accuracy_score(y_test, y_test_pred)
+test_pred = model.predict(X_test_final)
+test_f1 = f1_score(y_test, test_pred)
+
 test_auc = None
-y_proba = None
+test_pred_proba = None
 if hasattr(model, "predict_proba"):
-    y_proba = model.predict_proba(X_test_final)[:, 1]
+    test_pred_proba = model.predict_proba(X_test_final)[:, 1]
     try:
-        test_auc = roc_auc_score(y_test, y_proba)
+        test_auc = roc_auc_score(y_test, test_pred_proba)
     except ValueError:
         test_auc = None
 
 
-test_precision = precision_score(y_test, y_test_pred)
-test_recall = recall_score(y_test, y_test_pred)
-test_f1 = f1_score(y_test, y_test_pred)
-pr_auc = average_precision_score(y_test, y_proba) if test_auc is not None else None
-
+# Print summary
 print("\n[INFO] FINAL MODEL SUMMARY")
 print("=" * 40)
 print(f"[INFO] Best Config        : {best_model_name}")
-print(f"Validation Recall   : {best_model_pipeline['val_recall']:.3f}")
-print(f"Validation Precision: {best_model_pipeline['val_precision']:.3f}")
-print(f"Validation F1-Score : {best_model_pipeline['val_f1']:.3f}")
-print(f"Test Accuracy       : {true_test_accuracy:.3f}")
-print(f"Test ROC-AUC        : {test_auc:.3f}" if test_auc is not None else "")
-print(f"Test PR-AUC         : {pr_auc:.3f}" if pr_auc is not None else "")
-print(f"Test Recall         : {test_recall:.3f}")
-print(f"Test Precision      : {test_precision:.3f}")
-print(f"Test F1-Score       : {test_f1:.3f}")
+print(f"Validation F1-score: {best_model_pipeline['val_f1']:.3f}")
+print(f"Validation AUC: {best_model_pipeline['val_auc']:.3f}")
+print(f"Test F1-score      : {test_f1:.3f}")
+if test_auc is not None:
+    print(f"Test AUC           : {test_auc:.3f}")
+print("Model saved to     : 'best_model_upsampling.pkl'")
 print("=" * 40)
 
 # Confusion matrix
-cm = confusion_matrix(y_test, y_test_pred)
-cm_df = pd.DataFrame(cm, index=["Actual 0", "Actual 1"], columns=["Predicted 0", "Predicted 1"])
+cm = confusion_matrix(y_test, test_pred)
+cm_df = pd.DataFrame(cm, index=["Actual Diabetic", "Actual Healthy"], columns=["Predicted Diabetic", "Predicted Healthy"])
 sns.heatmap(cm_df, annot=True, fmt="d", cmap="Blues")
 plt.title("Confusion Matrix")
 plt.ylabel("Actual")
 plt.xlabel("Predicted")
 plt.show()
 
-
-if y_proba is not None:
-    precision, recall, _ = precision_recall_curve(y_test, y_proba)
-    plt.plot(recall, precision)
-    plt.title("Precision-Recall Curve")
-    plt.xlabel("Recall")
-    plt.ylabel("Precision")
-    plt.grid()
-    plt.show()
-
-
-
-# Save test metrics
-best_model_pipeline['test_accuracy'] = true_test_accuracy
+# Save
 best_model_pipeline['test_auc'] = test_auc
-best_model_pipeline['test_precision'] = test_precision
-best_model_pipeline['test_recall'] = test_recall
 best_model_pipeline['test_f1'] = test_f1
-best_model_pipeline['test_pr_auc'] = pr_auc
-joblib.dump(best_model_pipeline, 'best_model_gans_new_metrics.pkl')
+joblib.dump(best_model_pipeline, 'best_model_upsampling.pkl')
