@@ -98,11 +98,11 @@ data['Gender'] = (
 )
 
 # Drop ID column (not useful for modeling) and BMI (58% of the values are missing)
-data.drop(columns=["sample_id", "BMI"], inplace=True)
+data.drop(columns=["sample_id", "BMI", "Country"], inplace=True)
  
-# Convert all columns except 'Country' and 'healthy' to numeric
+# Convert all columns except 'healthy' to numeric            -----> Country is always China so it's irrelevant for learning
 for col in data.columns:
-    if col not in ['Country', 'healthy']:
+    if col not in ['healthy']:
         data[col] = pd.to_numeric(data[col], errors='coerce')
 
 # Drop rows with any missing values after conversion
@@ -128,8 +128,6 @@ X_train, X_val, y_train, y_val = train_test_split(
     X_dev, y_dev, test_size=0.25, stratify=y_dev, random_state=42
 )
 
-
-# --- Apply RANDOM UPSAMPLING to balance the training set only ---
 
 #Recombine X_train and y_train into one DataFrame for clarity
 # --- Recombine X_train and y_train for upsampling ---
@@ -163,39 +161,24 @@ y_train = train_df_upsampled['healthy']
 
 
 # --- Encode and scale data using both scalers (standard, minmax) ---
-
-# Fit encoder on training data
-encoder = OneHotEncoder(handle_unknown='ignore')
-encoder.fit(X_train[['Country']])
-
 best_performers = {}
 
 for scaler_name, scaler in scalers.items():
     print(f"\n[INFO] Applying scaler: {scaler_name}")
 
-    # --- Preprocess Training Set ---
-    X_train_num = X_train.drop(columns=['Country'])
-    X_train_cat = encoder.transform(X_train[['Country']]).toarray()
+    # --- No need to Preprocess Training Set ---
 
     # Fit scaler on training numeric data
-    scaler.fit(X_train_num)
-    X_train_scaled = scaler.transform(X_train_num)
+    scaler.fit(X_train)
 
-    # Combine scaled numeric + encoded categorical
-    X_train_processed = pd.concat([
-        pd.DataFrame(X_train_scaled, columns=X_train_num.columns),
-        pd.DataFrame(X_train_cat, columns=encoder.get_feature_names_out(['Country']))
-    ], axis=1).astype(np.float32)
+    #No need to Combine scaled numeric + encoded categorical
+    X_train_processed = pd.DataFrame(
+    scaler.transform(X_train), columns=X_train.columns).astype(np.float32)
 
-    # --- Preprocess Validation Set ---
-    X_val_num = X_val.drop(columns=['Country'])
-    X_val_cat = encoder.transform(X_val[['Country']]).toarray()
-    X_val_scaled = scaler.transform(X_val_num)
+    # --- No need to Preprocess Validation Set ---
 
-    X_val_processed = pd.concat([
-        pd.DataFrame(X_val_scaled, columns=X_val_num.columns),
-        pd.DataFrame(X_val_cat, columns=encoder.get_feature_names_out(['Country']))
-    ], axis=1).astype(np.float32)
+    X_val_processed = pd.DataFrame(
+    scaler.transform(X_val), columns=X_val.columns).astype(np.float32)
 
     # --- Estimate top-k features using RFECV on training data ---
 
@@ -384,7 +367,7 @@ for scaler_name, scaler in scalers.items():
  
                 best_label = max(all_results, key=safe_auc_key)
 
-                result_key = f"upsampling-{scaler_name}-{method}-{base_name}-{best_label}"
+                result_key = f"upsampling-v2-{scaler_name}-{method}-{base_name}-{best_label}"
                 val_auc = all_results[best_label].get('val_auc', -1)
                 val_f1 = all_results[best_label].get('val_f1', -1)
                 print(f"Candidate best: {result_key} | Val AUC: {val_auc:.3f} | Val F1-score: {val_f1:.3f}")
@@ -399,7 +382,6 @@ for scaler_name, scaler in scalers.items():
                         'model': model_copy,
                         'scaler': copy.deepcopy(scaler),
                         'selector': selector_copy,
-                        'encoder': copy.deepcopy(encoder),
                         'feature_method': method,
                         'base_model': base_name,
                         'k': k,
@@ -428,18 +410,13 @@ best_model_pipeline = best_entry['pipeline']
 # === Evaluate Final Model on Test Set ===
 model = best_model_pipeline['model']
 scaler = best_model_pipeline['scaler']
-encoder = best_model_pipeline['encoder']
 selector = best_model_pipeline['selector']
 features = best_model_pipeline['final_feature_names']
 
 # Preprocess test set
-X_test_num = X_test.drop(columns=['Country'])
-X_test_scaled = scaler.transform(X_test_num)
-X_test_cat = encoder.transform(X_test[['Country']]).toarray()
-X_test_proc = pd.concat([
-    pd.DataFrame(X_test_scaled, columns=X_test_num.columns),
-    pd.DataFrame(X_test_cat, columns=encoder.get_feature_names_out(['Country']))
-], axis=1).astype(np.float32)
+X_test_proc = pd.DataFrame(
+    scaler.transform(X_test), columns=X_test.columns
+).astype(np.float32)
 
 # Feature selection for test set
 X_test_final = X_test_proc.loc[:, features] #Select columns by label (not by implicit index order) and The column order matches exactly what was used in training

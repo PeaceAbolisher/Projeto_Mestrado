@@ -89,12 +89,19 @@ rfe_base_models = {
 #Load dataset
 data = pd.read_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\Project2\all_data_samples\project2_merged_data.csv", dtype=str)
 
-# Drop ID column (not useful for modeling)
-data.drop(columns=["sample_id"], inplace=True)
+# Binary-encode Gender (Female=1, Male=0)
+data['Gender'] = (
+    data['Gender']
+    .str.strip().str.lower()
+    .map({'male': 0, 'female': 1})
+)
 
-# Convert all columns except 'Country' and 'healthy' to numeric
+# Drop ID column (not useful for modeling) and BMI (58% of the values are missing), Country always the same
+data.drop(columns=["sample_id", "BMI", "Country"], inplace=True)
+
+# Convert all columns except 'healthy' to numeric            -----> Country is always China so it's irrelevant for learning
 for col in data.columns:
-    if col not in ['Country', 'healthy']:
+    if col not in ['healthy']:
         data[col] = pd.to_numeric(data[col], errors='coerce')
 
 # Drop rows with any missing values after conversion
@@ -102,6 +109,8 @@ data.dropna(inplace=True)
 
 #This is needed since the dataset is ordered (first X r)
 data = data.sample(frac=1, random_state=42).reset_index(drop=True)
+
+
 
 
 # --- Split data into training, validation, and test sets ---
@@ -140,10 +149,11 @@ if samples_needed_to_balance > 0:
     metadata = SingleTableMetadata()
     metadata.detect_from_dataframe(minority_df)
     for col in minority_df.columns:
-        if col not in ['Country', 'healthy', 'Age']:
+        if col == 'healthy':
+            metadata.update_column(column_name=col, sdtype='categorical')
+        else:
             metadata.update_column(column_name=col, sdtype='numerical')
-    metadata.update_column(column_name='Age', sdtype='numerical')
-    metadata.update_column(column_name='Country', sdtype='categorical')
+
 
     synthesizer = CTGANSynthesizer(metadata, epochs=300)
     synthesizer.fit(minority_df)
@@ -162,11 +172,11 @@ if extra_samples_needed > 0:
     # Train CTGAN on full (now balanced) training set
     metadata = SingleTableMetadata()
     metadata.detect_from_dataframe(train_df)
-    for col in train_df.columns:
-        if col not in ['Country', 'healthy', 'Age']:
+    for col in minority_df.columns:
+        if col == 'healthy':
+            metadata.update_column(column_name=col, sdtype='categorical')
+        else:
             metadata.update_column(column_name=col, sdtype='numerical')
-    metadata.update_column(column_name='Age', sdtype='numerical')
-    metadata.update_column(column_name='Country', sdtype='categorical')
 
     synthesizer = CTGANSynthesizer(metadata, epochs=300)
     synthesizer.fit(train_df)
@@ -179,40 +189,21 @@ if extra_samples_needed > 0:
 X_train = train_df.drop(columns=['healthy'])
 y_train = train_df['healthy']
 
-# --- Encode and scale data using both scalers (standard, minmax) ---
-
-# Fit encoder on training data
-encoder = OneHotEncoder(handle_unknown='ignore')
-encoder.fit(X_train[['Country']])
-
+# --- scale data using both scalers (standard, minmax) ---
 best_performers = {}
 
 for scaler_name, scaler in scalers.items():
     print(f"\n[INFO] Applying scaler: {scaler_name}")
 
-    # --- Preprocess Training Set ---
-    X_train_num = X_train.drop(columns=['Country'])
-    X_train_cat = encoder.transform(X_train[['Country']]).toarray()
+    scaler.fit(X_train)
+    X_train_processed = pd.DataFrame(
+        scaler.transform(X_train), columns=X_train.columns
+    ).astype(np.float32)
 
-    # Fit scaler on training numeric data
-    scaler.fit(X_train_num)
-    X_train_scaled = scaler.transform(X_train_num)
+    X_val_processed = pd.DataFrame(
+        scaler.transform(X_val), columns=X_val.columns
+    ).astype(np.float32)
 
-    # Combine scaled numeric + encoded categorical
-    X_train_processed = pd.concat([
-        pd.DataFrame(X_train_scaled, columns=X_train_num.columns),
-        pd.DataFrame(X_train_cat, columns=encoder.get_feature_names_out(['Country']))
-    ], axis=1).astype(np.float32)
-
-    # --- Preprocess Validation Set ---
-    X_val_num = X_val.drop(columns=['Country'])
-    X_val_cat = encoder.transform(X_val[['Country']]).toarray()
-    X_val_scaled = scaler.transform(X_val_num)
-
-    X_val_processed = pd.concat([
-        pd.DataFrame(X_val_scaled, columns=X_val_num.columns),
-        pd.DataFrame(X_val_cat, columns=encoder.get_feature_names_out(['Country']))
-    ], axis=1).astype(np.float32)
 
     # --- Estimate top-k features using RFECV on training data ---
 
@@ -401,7 +392,7 @@ for scaler_name, scaler in scalers.items():
 
                 best_label = max(all_results, key=safe_auc_key)
 
-                result_key = f"ctgan-{scaler_name}-{method}-{base_name}-{best_label}"
+                result_key = f"ctgan-v2{scaler_name}-{method}-{base_name}-{best_label}"
                 val_auc = all_results[best_label].get('val_auc', -1)
                 val_f1 = all_results[best_label].get('val_f1', -1)
                 print(f"Candidate best: {result_key} | Val AUC: {val_auc:.3f} | Val F1-score: {val_f1:.3f}")
@@ -416,7 +407,6 @@ for scaler_name, scaler in scalers.items():
                         'model': model_copy,
                         'scaler': copy.deepcopy(scaler),
                         'selector': selector_copy,
-                        'encoder': copy.deepcopy(encoder),
                         'feature_method': method,
                         'base_model': base_name,
                         'k': k,
@@ -445,18 +435,13 @@ best_model_pipeline = best_entry['pipeline']
 # === Evaluate Final Model on Test Set ===
 model = best_model_pipeline['model']
 scaler = best_model_pipeline['scaler']
-encoder = best_model_pipeline['encoder']
 selector = best_model_pipeline['selector']
 features = best_model_pipeline['final_feature_names']
 
 # Preprocess test set
-X_test_num = X_test.drop(columns=['Country'])
-X_test_scaled = scaler.transform(X_test_num)
-X_test_cat = encoder.transform(X_test[['Country']]).toarray()
-X_test_proc = pd.concat([
-    pd.DataFrame(X_test_scaled, columns=X_test_num.columns),
-    pd.DataFrame(X_test_cat, columns=encoder.get_feature_names_out(['Country']))
-], axis=1).astype(np.float32)
+X_test_proc = pd.DataFrame(
+    scaler.transform(X_test), columns=X_test.columns
+).astype(np.float32)
 
 # Feature selection for test set
 X_test_final = X_test_proc.loc[:, features] #Select columns by label (not by implicit index order) and The column order matches exactly what was used in training
