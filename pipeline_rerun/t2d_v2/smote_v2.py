@@ -88,10 +88,17 @@ rfe_base_models = {
     'svm': SVC(kernel='linear')
 }
 #Load dataset
-data = pd.read_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\Project1\all_data_samples\merged_data.csv", dtype=str)
+data = pd.read_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\Project2\all_data_samples\project2_merged_data.csv", dtype=str)
 
-# Drop ID column (not useful for modeling)
-data.drop(columns=["sample_id"], inplace=True)
+# Binary-encode Gender (Female=1, Male=0)
+data['Gender'] = (
+    data['Gender']
+    .str.strip().str.lower()
+    .map({'male': 0, 'female': 1})
+)
+
+# Drop ID column (not useful for modeling) and BMI (58% of the values are missing)
+data.drop(columns=["sample_id", "BMI"], inplace=True)
 
 # Convert all columns except 'Country' and 'healthy' to numeric
 for col in data.columns:
@@ -456,7 +463,7 @@ print(f"Validation AUC: {best_model_pipeline['val_auc']:.3f}")
 print(f"Test F1-score      : {test_f1:.3f}")
 if test_auc is not None:
     print(f"Test AUC           : {test_auc:.3f}")
-print("Model saved to     : 'best_model_smote.pkl'")
+print("Model saved to     : 'best_model_smote_v2.pkl'")
 print("=" * 40)
 
 # Confusion matrix
@@ -475,4 +482,4 @@ plt.show()
 # Save
 best_model_pipeline['test_auc'] = test_auc
 best_model_pipeline['test_f1'] = test_f1
-joblib.dump(best_model_pipeline, 'best_model_smote.pkl')
+joblib.dump(best_model_pipeline, 'best_model_smote_v2.pkl')
