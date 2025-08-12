@@ -121,8 +121,6 @@ X_train, X_val, y_train, y_val = train_test_split(
 )
 
 
-# --- Apply RANDOM UPSAMPLING to balance the training set only ---
-
 #Recombine X_train and y_train into one DataFrame for clarity
 # --- Recombine X_train and y_train for upsampling ---
 train_df = X_train.copy()
