@@ -1,10 +1,11 @@
-# SMOTE Class Balancing
+# GANS Class Balancing
 import numpy as np
 import pandas as pd
 import joblib
 import tensorflow as tf
 import copy
 from sdv.metadata import SingleTableMetadata
+from sdv.single_table import CTGANSynthesizer
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import (
@@ -26,8 +27,6 @@ from tensorflow.keras import Input
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.optimizers import Adam
-from imblearn.over_sampling import SMOTENC
-
 
 def create_mlp_model(input_dim=20, hidden_layers=[64, 32], dropout_rate=0.2, learning_rate=0.001):
     model = Sequential()
@@ -44,7 +43,7 @@ def create_mlp_model(input_dim=20, hidden_layers=[64, 32], dropout_rate=0.2, lea
     return model
 
 
-print("\n[INFO] Starting SMOTE-Balanced Model Selection Pipeline...\n")
+print("\n[INFO] Starting GANS-Balanced And Augmentation Model Selection Pipeline...\n")
 # --- Model Setup ---
 models = {
     'rf': RandomForestClassifier(),
@@ -122,34 +121,63 @@ X_train, X_val, y_train, y_val = train_test_split(
 )
 
 
-# --- Apply SMOTENC to balance the training set only ---
+# --- Apply GAN (CTGAN) to balance the training set AND augment up to 1000 samples ---
 
-#Recombine X_train and y_train into one DataFrame for clarity
+TARGET_TOTAL = 1000
 train_df = X_train.copy()
 train_df['healthy'] = y_train
 
-# Split features and target again
-# We explicitly separate them after recombining to avoid confusion
-X_train_bal = train_df.drop(columns=['healthy'])
-y_train_bal = train_df['healthy']
+# Step 1: Balance classes if needed
+class_counts = train_df['healthy'].value_counts()
+minority_class = class_counts.idxmin()
+majority_class = class_counts.idxmax()
+samples_needed_to_balance = class_counts[majority_class] - class_counts[minority_class]
 
-#Identify categorical feature(s) by index, SMOTENC requires us to provide the index of categorical columns in X
-# In this case, "Country" is the only categorical column
-cat_indices = [X_train_bal.columns.get_loc('Country')]
+if samples_needed_to_balance > 0:
+    print(f"Balancing: CTGAN generating {samples_needed_to_balance} samples for class {minority_class}")
+    minority_df = train_df[train_df['healthy'] == minority_class].copy()
 
-#Initialize SMOTENC, SMOTENC will create synthetic samples *only* for the minority class, and treat "Country" as a categorical column (no interpolation)
-smote = SMOTENC(categorical_features=cat_indices, random_state=42)
+    metadata = SingleTableMetadata()
+    metadata.detect_from_dataframe(minority_df)
+    for col in minority_df.columns:
+        if col not in ['Country', 'healthy', 'Age']:
+            metadata.update_column(column_name=col, sdtype='numerical')
+    metadata.update_column(column_name='Age', sdtype='numerical')
+    metadata.update_column(column_name='Country', sdtype='categorical')
 
-#Fit and resample the data
-X_resampled, y_resampled = smote.fit_resample(X_train_bal, y_train_bal)
+    synthesizer = CTGANSynthesizer(metadata, epochs=300)
+    synthesizer.fit(minority_df)
+    synthetic_balance = synthesizer.sample(samples_needed_to_balance)
 
-#Convert the resampled X back to a DataFrame with original column names
-X_train = pd.DataFrame(X_resampled, columns=X_train_bal.columns)
+    # Combine to make classes balanced
+    train_df = pd.concat([train_df, synthetic_balance], ignore_index=True)
 
-#Assign resampled labels to y_train
-y_train = y_resampled
+# Step 2: Augment to reach total of 1000 samples
+total_after_balance = len(train_df)
+extra_samples_needed = TARGET_TOTAL - total_after_balance
 
+if extra_samples_needed > 0:
+    print(f"Augmenting dataset with {extra_samples_needed} additional synthetic samples")
 
+    # Train CTGAN on full (now balanced) training set
+    metadata = SingleTableMetadata()
+    metadata.detect_from_dataframe(train_df)
+    for col in train_df.columns:
+        if col not in ['Country', 'healthy', 'Age']:
+            metadata.update_column(column_name=col, sdtype='numerical')
+    metadata.update_column(column_name='Age', sdtype='numerical')
+    metadata.update_column(column_name='Country', sdtype='categorical')
+
+    synthesizer = CTGANSynthesizer(metadata, epochs=300)
+    synthesizer.fit(train_df)
+    synthetic_extra = synthesizer.sample(extra_samples_needed)
+
+    # Combine all together
+    train_df = pd.concat([train_df, synthetic_extra], ignore_index=True)
+
+# Final training sets
+X_train = train_df.drop(columns=['healthy'])
+y_train = train_df['healthy']
 
 # --- Encode and scale data using both scalers (standard, minmax) ---
 
@@ -396,10 +424,10 @@ for scaler_name, scaler in scalers.items():
                         'pre_selection_feature_names': list(X_train_processed.columns),
                         'final_feature_names': list(selected_features),
                         'scaler_type': scaler_name,
-                        'balancing_method': 'smote',
+                        'balancing_method': 'gan_ctgan',
                         'val_auc': val_auc,
                         'val_f1': val_f1,
-                        'augmentation': None
+                        'augmentation': 'gan'
                     },
                 }
 
@@ -456,12 +484,16 @@ print(f"Validation AUC: {best_model_pipeline['val_auc']:.3f}")
 print(f"Test F1-score      : {test_f1:.3f}")
 if test_auc is not None:
     print(f"Test AUC           : {test_auc:.3f}")
-print("Model saved to     : 'best_model_smote.pkl'")
+print("Model saved to     : 'best_model_gans_augmented.pkl'")
 print("=" * 40)
 
 # Confusion matrix
 cm = confusion_matrix(y_test, test_pred)
-cm_df = pd.DataFrame(cm, index=["Actual Diabetic", "Actual Healthy"], columns=["Predicted Diabetic", "Predicted Healthy"])
+cm_df = pd.DataFrame(
+    cm,
+    index=["Actual Healthy", "Actual Diabetic"],
+    columns=["Predicted Healthy", "Predicted Diabetic"]
+)
 sns.heatmap(cm_df, annot=True, fmt="d", cmap="Blues")
 plt.title("Confusion Matrix")
 plt.ylabel("Actual")
@@ -471,4 +503,4 @@ plt.show()
 # Save
 best_model_pipeline['test_auc'] = test_auc
 best_model_pipeline['test_f1'] = test_f1
-joblib.dump(best_model_pipeline, 'best_model_smote.pkl')
+joblib.dump(best_model_pipeline, 'best_model_gans_augmented.pkl')

@@ -1,11 +1,10 @@
-# GANS Class Balancing
+# SMOTE Class Balancing
 import numpy as np
 import pandas as pd
 import joblib
 import tensorflow as tf
 import copy
 from sdv.metadata import SingleTableMetadata
-from sdv.single_table import CTGANSynthesizer
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import (
@@ -27,6 +26,8 @@ from tensorflow.keras import Input
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.optimizers import Adam
+from imblearn.over_sampling import SMOTENC
+
 
 def create_mlp_model(input_dim=20, hidden_layers=[64, 32], dropout_rate=0.2, learning_rate=0.001):
     model = Sequential()
@@ -43,7 +44,7 @@ def create_mlp_model(input_dim=20, hidden_layers=[64, 32], dropout_rate=0.2, lea
     return model
 
 
-print("\n[INFO] Starting GANS-Balanced Model Selection Pipeline...\n")
+print("\n[INFO] Starting SMOTE-Balanced Model Selection Pipeline...\n")
 # --- Model Setup ---
 models = {
     'rf': RandomForestClassifier(),
@@ -121,43 +122,33 @@ X_train, X_val, y_train, y_val = train_test_split(
 )
 
 
-#--- Apply GAN (CTGAN) to balance the training set only ---
+# --- Apply SMOTENC to balance the training set only ---
 
-#balances on training data ONLY
+#Recombine X_train and y_train into one DataFrame for clarity
 train_df = X_train.copy()
 train_df['healthy'] = y_train
 
-# Identify class imbalance
-minority_class = train_df['healthy'].value_counts().idxmin()
-majority_class = train_df['healthy'].value_counts().idxmax()
-samples_needed = train_df['healthy'].value_counts()[majority_class] - train_df['healthy'].value_counts()[minority_class]
+# Split features and target again
+# We explicitly separate them after recombining to avoid confusion
+X_train_bal = train_df.drop(columns=['healthy'])
+y_train_bal = train_df['healthy']
 
-# Generate synthetic samples only if needed
-if samples_needed > 0:
-    # Subset of minority class only
-    minority_df = train_df[train_df['healthy'] == minority_class].copy()
+#Identify categorical feature(s) by index, SMOTENC requires us to provide the index of categorical columns in X
+# In this case, "Country" is the only categorical column
+cat_indices = [X_train_bal.columns.get_loc('Country')]
 
-    # Define metadata schema for CTGAN
-    metadata = SingleTableMetadata()
-    metadata.detect_from_dataframe(minority_df)
+#Initialize SMOTENC, SMOTENC will create synthetic samples *only* for the minority class, and treat "Country" as a categorical column (no interpolation)
+smote = SMOTENC(categorical_features=cat_indices, random_state=42)
 
-    for column in minority_df.columns:
-        if column not in ['Country', 'healthy', 'Age']:
-            metadata.update_column(column_name=column, sdtype='numerical')
-    metadata.update_column(column_name='Age', sdtype='numerical')
-    metadata.update_column(column_name='Country', sdtype='categorical')
+#Fit and resample the data
+X_resampled, y_resampled = smote.fit_resample(X_train_bal, y_train_bal)
 
-    # Fit CTGAN to minority data and sample to balance
-    synthesizer = CTGANSynthesizer(metadata, epochs=300)
-    synthesizer.fit(minority_df)
-    synthetic_df = synthesizer.sample(samples_needed)
+#Convert the resampled X back to a DataFrame with original column names
+X_train = pd.DataFrame(X_resampled, columns=X_train_bal.columns)
 
-    # Combine real and synthetic into a balanced training set
-    train_df = pd.concat([train_df, synthetic_df], ignore_index=True)
+#Assign resampled labels to y_train
+y_train = y_resampled
 
-# Update training X and y with balanced data
-X_train = train_df.drop(columns=['healthy'])
-y_train = train_df['healthy']
 
 
 # --- Encode and scale data using both scalers (standard, minmax) ---
@@ -382,7 +373,7 @@ for scaler_name, scaler in scalers.items():
 
                 best_label = max(all_results, key=safe_auc_key)
 
-                result_key = f"ctgan-{scaler_name}-{method}-{base_name}-{best_label}"
+                result_key = f"smote-{scaler_name}-{method}-{base_name}-{best_label}"
                 val_auc = all_results[best_label].get('val_auc', -1)
                 val_f1 = all_results[best_label].get('val_f1', -1)
                 print(f"Candidate best: {result_key} | Val AUC: {val_auc:.3f} | Val F1-score: {val_f1:.3f}")
@@ -405,7 +396,7 @@ for scaler_name, scaler in scalers.items():
                         'pre_selection_feature_names': list(X_train_processed.columns),
                         'final_feature_names': list(selected_features),
                         'scaler_type': scaler_name,
-                        'balancing_method': 'gan_ctgan',
+                        'balancing_method': 'smote',
                         'val_auc': val_auc,
                         'val_f1': val_f1,
                         'augmentation': None
@@ -465,12 +456,16 @@ print(f"Validation AUC: {best_model_pipeline['val_auc']:.3f}")
 print(f"Test F1-score      : {test_f1:.3f}")
 if test_auc is not None:
     print(f"Test AUC           : {test_auc:.3f}")
-print("Model saved to     : 'best_model_gans.pkl'")
+print("Model saved to     : 'best_model_smote.pkl'")
 print("=" * 40)
 
 # Confusion matrix
 cm = confusion_matrix(y_test, test_pred)
-cm_df = pd.DataFrame(cm, index=["Actual Diabetic", "Actual Healthy"], columns=["Predicted Diabetic", "Predicted Healthy"])
+cm_df = pd.DataFrame(
+    cm,
+    index=["Actual Healthy", "Actual Diabetic"],
+    columns=["Predicted Healthy", "Predicted Diabetic"]
+)
 sns.heatmap(cm_df, annot=True, fmt="d", cmap="Blues")
 plt.title("Confusion Matrix")
 plt.ylabel("Actual")
@@ -480,4 +475,4 @@ plt.show()
 # Save
 best_model_pipeline['test_auc'] = test_auc
 best_model_pipeline['test_f1'] = test_f1
-joblib.dump(best_model_pipeline, 'best_model_gans.pkl')
+joblib.dump(best_model_pipeline, 'best_model_smote.pkl')

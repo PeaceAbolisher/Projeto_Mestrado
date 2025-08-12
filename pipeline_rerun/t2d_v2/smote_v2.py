@@ -1,11 +1,10 @@
-# GANS Class Balancing
+# SMOTE Class Balancing
 import numpy as np
 import pandas as pd
 import joblib
 import tensorflow as tf
 import copy
 from sdv.metadata import SingleTableMetadata
-from sdv.single_table import CTGANSynthesizer
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.ensemble import (
@@ -16,7 +15,7 @@ from sklearn.metrics import roc_auc_score, confusion_matrix, f1_score
 from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.preprocessing import StandardScaler,MinMaxScaler
+from sklearn.preprocessing import StandardScaler,MinMaxScaler, OneHotEncoder
 from sklearn.feature_selection import SelectKBest, mutual_info_classif, RFECV
 from sklearn.base import clone
 from xgboost import XGBClassifier
@@ -27,6 +26,8 @@ from tensorflow.keras import Input
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.optimizers import Adam
+from imblearn.over_sampling import SMOTENC
+
 
 def create_mlp_model(input_dim=20, hidden_layers=[64, 32], dropout_rate=0.2, learning_rate=0.001):
     model = Sequential()
@@ -43,7 +44,7 @@ def create_mlp_model(input_dim=20, hidden_layers=[64, 32], dropout_rate=0.2, lea
     return model
 
 
-print("\n[INFO] Starting GANS-Balanced Model Selection Pipeline For Obesity...\n")
+print("\n[INFO] Starting SMOTE-Balanced Model Selection Pipeline...\n")
 # --- Model Setup ---
 models = {
     'rf': RandomForestClassifier(),
@@ -87,14 +88,14 @@ rfe_base_models = {
     'svm': SVC(kernel='linear')
 }
 #Load dataset
-data = pd.read_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\Obesity\all_data\merged_obesity_dataset.csv", dtype=str)
+data = pd.read_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\Project1\all_data_samples\merged_data.csv", dtype=str)
 
 # Drop ID column (not useful for modeling)
 data.drop(columns=["sample_id"], inplace=True)
 
-# Convert all columns except 'healthy' to numeric
+# Convert all columns except 'Country' and 'healthy' to numeric
 for col in data.columns:
-    if col not in ['healthy']:
+    if col not in ['Country', 'healthy']:
         data[col] = pd.to_numeric(data[col], errors='coerce')
 
 # Drop rows with any missing values after conversion
@@ -121,56 +122,69 @@ X_train, X_val, y_train, y_val = train_test_split(
 )
 
 
-#--- Apply GAN (CTGAN) to balance the training set only ---
+# --- Apply SMOTENC to balance the training set only ---
 
-#balances on training data ONLY
+#Recombine X_train and y_train into one DataFrame for clarity
 train_df = X_train.copy()
 train_df['healthy'] = y_train
 
-# Identify class imbalance
-minority_class = train_df['healthy'].value_counts().idxmin()
-majority_class = train_df['healthy'].value_counts().idxmax()
-samples_needed = train_df['healthy'].value_counts()[majority_class] - train_df['healthy'].value_counts()[minority_class]
+# Split features and target again
+# We explicitly separate them after recombining to avoid confusion
+X_train_bal = train_df.drop(columns=['healthy'])
+y_train_bal = train_df['healthy']
 
-# Generate synthetic samples only if needed
-if samples_needed > 0:
-    # Subset of minority class only
-    minority_df = train_df[train_df['healthy'] == minority_class].copy()
+#Identify categorical feature(s) by index, SMOTENC requires us to provide the index of categorical columns in X
+# In this case, "Country" is the only categorical column
+cat_indices = [X_train_bal.columns.get_loc('Country')]
 
-    # Define metadata schema for CTGAN
-    metadata = SingleTableMetadata()
-    metadata.detect_from_dataframe(minority_df)
+#Initialize SMOTENC, SMOTENC will create synthetic samples *only* for the minority class, and treat "Country" as a categorical column (no interpolation)
+smote = SMOTENC(categorical_features=cat_indices, random_state=42)
 
-# Ensure all feature columns are numerical and 'healthy' is categorical (constant = minority class)
-    for col in minority_df.columns:
-        if col == 'healthy':
-            metadata.update_column(column_name=col, sdtype='categorical')
-        else:
-            metadata.update_column(column_name=col, sdtype='numerical')
+#Fit and resample the data
+X_resampled, y_resampled = smote.fit_resample(X_train_bal, y_train_bal)
 
-    # Fit CTGAN to minority data and sample to balance
-    synthesizer = CTGANSynthesizer(metadata, epochs=300)
-    synthesizer.fit(minority_df)
-    synthetic_df = synthesizer.sample(samples_needed)
+#Convert the resampled X back to a DataFrame with original column names
+X_train = pd.DataFrame(X_resampled, columns=X_train_bal.columns)
 
-    # Combine real and synthetic into a balanced training set
-    train_df = pd.concat([train_df, synthetic_df], ignore_index=True)
-
-# Update training X and y with balanced data
-X_train = train_df.drop(columns=['healthy'])
-y_train = train_df['healthy']
+#Assign resampled labels to y_train
+y_train = y_resampled
 
 
-# --- scale data using both scalers (standard, minmax) ---
+
+# --- Encode and scale data using both scalers (standard, minmax) ---
+
+# Fit encoder on training data
+encoder = OneHotEncoder(handle_unknown='ignore')
+encoder.fit(X_train[['Country']])
+
 best_performers = {}
 
 for scaler_name, scaler in scalers.items():
     print(f"\n[INFO] Applying scaler: {scaler_name}")
-    scaler.fit(X_train)
 
-    X_train_processed = pd.DataFrame(scaler.transform(X_train), columns=X_train.columns).astype(np.float32)
+    # --- Preprocess Training Set ---
+    X_train_num = X_train.drop(columns=['Country'])
+    X_train_cat = encoder.transform(X_train[['Country']]).toarray()
 
-    X_val_processed = pd.DataFrame(scaler.transform(X_val), columns=X_val.columns).astype(np.float32)
+    # Fit scaler on training numeric data
+    scaler.fit(X_train_num)
+    X_train_scaled = scaler.transform(X_train_num)
+
+    # Combine scaled numeric + encoded categorical
+    X_train_processed = pd.concat([
+        pd.DataFrame(X_train_scaled, columns=X_train_num.columns),
+        pd.DataFrame(X_train_cat, columns=encoder.get_feature_names_out(['Country']))
+    ], axis=1).astype(np.float32)
+
+    # --- Preprocess Validation Set ---
+    X_val_num = X_val.drop(columns=['Country'])
+    X_val_cat = encoder.transform(X_val[['Country']]).toarray()
+    X_val_scaled = scaler.transform(X_val_num)
+
+    X_val_processed = pd.concat([
+        pd.DataFrame(X_val_scaled, columns=X_val_num.columns),
+        pd.DataFrame(X_val_cat, columns=encoder.get_feature_names_out(['Country']))
+    ], axis=1).astype(np.float32)
 
     # --- Estimate top-k features using RFECV on training data ---
 
@@ -359,7 +373,7 @@ for scaler_name, scaler in scalers.items():
 
                 best_label = max(all_results, key=safe_auc_key)
 
-                result_key = f"ctgan-{scaler_name}-{method}-{base_name}-{best_label}"
+                result_key = f"smote-{scaler_name}-{method}-{base_name}-{best_label}"
                 val_auc = all_results[best_label].get('val_auc', -1)
                 val_f1 = all_results[best_label].get('val_f1', -1)
                 print(f"Candidate best: {result_key} | Val AUC: {val_auc:.3f} | Val F1-score: {val_f1:.3f}")
@@ -374,6 +388,7 @@ for scaler_name, scaler in scalers.items():
                         'model': model_copy,
                         'scaler': copy.deepcopy(scaler),
                         'selector': selector_copy,
+                        'encoder': copy.deepcopy(encoder),
                         'feature_method': method,
                         'base_model': base_name,
                         'k': k,
@@ -381,7 +396,7 @@ for scaler_name, scaler in scalers.items():
                         'pre_selection_feature_names': list(X_train_processed.columns),
                         'final_feature_names': list(selected_features),
                         'scaler_type': scaler_name,
-                        'balancing_method': 'gan_ctgan',
+                        'balancing_method': 'smote',
                         'val_auc': val_auc,
                         'val_f1': val_f1,
                         'augmentation': None
@@ -402,11 +417,18 @@ best_model_pipeline = best_entry['pipeline']
 # === Evaluate Final Model on Test Set ===
 model = best_model_pipeline['model']
 scaler = best_model_pipeline['scaler']
+encoder = best_model_pipeline['encoder']
 selector = best_model_pipeline['selector']
 features = best_model_pipeline['final_feature_names']
 
 # Preprocess test set
-X_test_proc = pd.DataFrame(scaler.transform(X_test), columns=X_test.columns).astype(np.float32)
+X_test_num = X_test.drop(columns=['Country'])
+X_test_scaled = scaler.transform(X_test_num)
+X_test_cat = encoder.transform(X_test[['Country']]).toarray()
+X_test_proc = pd.concat([
+    pd.DataFrame(X_test_scaled, columns=X_test_num.columns),
+    pd.DataFrame(X_test_cat, columns=encoder.get_feature_names_out(['Country']))
+], axis=1).astype(np.float32)
 
 # Feature selection for test set
 X_test_final = X_test_proc.loc[:, features] #Select columns by label (not by implicit index order) and The column order matches exactly what was used in training
@@ -434,12 +456,17 @@ print(f"Validation AUC: {best_model_pipeline['val_auc']:.3f}")
 print(f"Test F1-score      : {test_f1:.3f}")
 if test_auc is not None:
     print(f"Test AUC           : {test_auc:.3f}")
-print("Model saved to     : 'obesity_best_model_gans.pkl'")
+print("Model saved to     : 'best_model_smote.pkl'")
 print("=" * 40)
 
 # Confusion matrix
 cm = confusion_matrix(y_test, test_pred)
-cm_df = pd.DataFrame(cm,index=["Actual Healthy", "Actual Obese"],columns=["Predicted Healthy", "Predicted Obese"])
+cm_df = pd.DataFrame(
+    cm,
+    index=["Actual Healthy", "Actual Diabetic"],
+    columns=["Predicted Healthy", "Predicted Diabetic"]
+)
+sns.heatmap(cm_df, annot=True, fmt="d", cmap="Blues")
 plt.title("Confusion Matrix")
 plt.ylabel("Actual")
 plt.xlabel("Predicted")
@@ -448,4 +475,4 @@ plt.show()
 # Save
 best_model_pipeline['test_auc'] = test_auc
 best_model_pipeline['test_f1'] = test_f1
-joblib.dump(best_model_pipeline, 'obesity_best_model_gans.pkl')
+joblib.dump(best_model_pipeline, 'best_model_smote.pkl')

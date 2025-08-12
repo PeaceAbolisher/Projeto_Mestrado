@@ -489,7 +489,11 @@ print("=" * 40)
 
 # Confusion matrix
 cm = confusion_matrix(y_test, test_pred)
-cm_df = pd.DataFrame(cm, index=["Actual Diabetic", "Actual Healthy"], columns=["Predicted Diabetic", "Predicted Healthy"])
+cm_df = pd.DataFrame(
+    cm,
+    index=["Actual Healthy", "Actual Diabetic"],
+    columns=["Predicted Healthy", "Predicted Diabetic"]
+)
 sns.heatmap(cm_df, annot=True, fmt="d", cmap="Blues")
 plt.title("Confusion Matrix")
 plt.ylabel("Actual")
