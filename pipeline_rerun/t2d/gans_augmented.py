@@ -87,7 +87,7 @@ rfe_base_models = {
     'svm': SVC(kernel='linear')
 }
 #Load dataset
-data = pd.read_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\Project1\all_data_samples\merged_data.csv", dtype=str)
+data = pd.read_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\diabetes_PRJEB1786\all_data_samples\merged_data.csv", dtype=str)
 
 # Drop ID column (not useful for modeling)
 data.drop(columns=["sample_id"], inplace=True)
