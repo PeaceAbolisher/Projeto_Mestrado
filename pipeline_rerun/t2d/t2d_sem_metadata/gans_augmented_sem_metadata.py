@@ -43,7 +43,7 @@ def create_mlp_model(input_dim=20, hidden_layers=[64, 32], dropout_rate=0.2, lea
     return model
 
 
-print("\n[INFO] Starting GANS-Balanced And Augmentation Model Selection Pipeline...\n")
+print("\n[INFO] Starting GANS-Balanced And Augmentation Model Selection Pipeline SEM METADATA...\n")
 # --- Model Setup ---
 models = {
     'rf': RandomForestClassifier(),
