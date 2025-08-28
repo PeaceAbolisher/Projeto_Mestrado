@@ -445,7 +445,7 @@ print(f"Validation AUC: {best_model_pipeline['val_auc']:.3f}")
 print(f"Test F1-score      : {test_f1:.3f}")
 if test_auc is not None:
     print(f"Test AUC           : {test_auc:.3f}")
-print("Model saved to     : 'best_model_gans.pkl'")
+print("Model saved to     : 'best_model_gans_sem_metadata.pkl'")
 print("=" * 40)
 
 # Confusion matrix
@@ -464,4 +464,4 @@ plt.show()
 # Save
 best_model_pipeline['test_auc'] = test_auc
 best_model_pipeline['test_f1'] = test_f1
-joblib.dump(best_model_pipeline, 'best_model_gans.pkl')
+joblib.dump(best_model_pipeline, 'best_model_gans_sem_metadata.pkl')
