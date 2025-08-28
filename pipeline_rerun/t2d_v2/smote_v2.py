@@ -88,7 +88,7 @@ rfe_base_models = {
     'svm': SVC(kernel='linear')
 }
 #Load dataset
-data = pd.read_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\Project2\all_data_samples\project2_merged_data.csv", dtype=str)
+data = pd.read_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\diabetesv2\all_data_samples\project2_merged_data.csv", dtype=str)
 
 # Binary-encode Gender (Female=1, Male=0)
 data['Gender'] = (
