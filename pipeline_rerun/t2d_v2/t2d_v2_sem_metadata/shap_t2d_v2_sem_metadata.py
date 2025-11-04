@@ -6,6 +6,31 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier,
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 import matplotlib.pyplot as plt
+from scikeras.wrappers import KerasClassifier  # needed for unpickling
+from tensorflow.keras import Input
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.optimizers import Adam
+
+#allow unpickling models that reference create_mlp_model / KerasClassifier
+def create_mlp_model(input_dim=20, hidden_layers=[64, 32], dropout_rate=0.2, learning_rate=0.001):
+    model = Sequential()
+    model.add(Input(shape=(input_dim,)))
+    model.add(Dense(hidden_layers[0], activation='relu')); model.add(Dropout(dropout_rate))
+    for units in hidden_layers[1:]:
+        model.add(Dense(units, activation='relu')); model.add(Dropout(dropout_rate))
+    model.add(Dense(1, activation='sigmoid'))
+    model.compile(optimizer=Adam(learning_rate=learning_rate),
+                  loss='binary_crossentropy', metrics=[])
+    return model
+
+# compatibility shims for pickles saved with different module paths
+import sys, types, __main__
+shim = types.ModuleType("my_models")
+shim.create_mlp_model = create_mlp_model
+sys.modules["my_models"] = shim                 # supports my_models.create_mlp_model
+__main__.create_mlp_model = create_mlp_model    # supports __main__.create_mlp_model
+
 
 try:
     from xgboost import XGBClassifier
@@ -14,42 +39,44 @@ except Exception:
     HAS_XGB = False
 
 # ----------------- CONFIG -----------------
-DATA_CSV = r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\diabetes_PRJEB1786\all_data_samples\merged_data.csv"
+DATA_CSV = r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\diabetesv2\all_data_samples\project2_merged_data.csv"
 
 # >>> Here you can put full paths for each model <<<
 MODEL_FILES = [
-    r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\output\t2d_sem_metadata\gans_augmented\best_model_gans_augmented_sem_metadata.pkl",
-    r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\output\t2d_sem_metadata\gans\best_model_gans_sem_metadata.pkl",
-    r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\output\t2d_sem_metadata\smote\best_model_smote_sem_metadata.pkl",
-    r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\output\t2d_sem_metadata\upsampling\best_model_upsampling_sem_metadata.pkl",
+    r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\output\t2d_dataset_v2_sem_metadata\gans_augmented\best_model_gans_augmented_v2_sem_metadata.pkl",
+    r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\output\t2d_dataset_v2_sem_metadata\gans\best_model_gans_v2_sem_metadata.pkl",
+    r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\output\t2d_dataset_v2_sem_metadata\smote\best_model_smote_v2_sem_metadata.pkl",
+    r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\output\t2d_dataset_v2_sem_metadata\upsampling\best_model_upsampling_v2_sem_metadata.pkl",
 ]
+OUTDIR = Path("t2d_v2shap_reports_sem_metadata"); OUTDIR.mkdir(exist_ok=True)
 
-OUTDIR = Path("t2d_shap_reports_sem_metadata"); OUTDIR.mkdir(exist_ok=True)
 RANDOM_STATE = 42
 TEST_SUBSAMPLE = None        # ← use ALL test rows for explanations
 BACKGROUND_SUBSAMPLE = None  # ← use ALL test rows as background (Kernel/Linear only)
 POS_CLASS_INDEX = 1
 # ------------------------------------------
 
-df = pd.read_csv(DATA_CSV, dtype=str)
+data = pd.read_csv(DATA_CSV, dtype=str)
 
-# Drop metadata exactly like training
-df.drop(columns=[c for c in ['sample_id', 'Country', 'Age'] if c in df.columns],
-        inplace=True, errors='ignore')
+# Drop ID column (not useful for modeling), BMI (58% missing), Country (constant = China), and demographic metadata (Age, Gender)
+data.drop(columns=["sample_id", "BMI", "Country", "Age", "Gender"], inplace=True)
 
-# Cast non-target to numeric
-for c in df.columns:
-    if c != 'healthy':
-        df[c] = pd.to_numeric(df[c], errors='coerce')
+# Convert all columns except 'healthy' to numeric            -----> Country is always China so it's irrelevant for learning
+for col in data.columns:
+    if col not in ['healthy']:
+        data[col] = pd.to_numeric(data[col], errors='coerce')
 
-# Drop rows with any NaNs and shuffle
-df = df.dropna().sample(frac=1, random_state=RANDOM_STATE).reset_index(drop=True)
+# Drop rows with any missing values after conversion
+data.dropna(inplace=True)
 
-if len(df) == 0:
+#This is needed since the dataset is ordered (first X r)
+data = data.sample(frac=1, random_state=42).reset_index(drop=True)
+
+if len(data) == 0:
     raise ValueError("No rows left after cleaning — check column types and NaNs.")
 
-X = df.drop(columns=['healthy'])
-y = df['healthy'].astype(int)
+X = data.drop(columns=['healthy'])
+y = data['healthy'].astype(int)
 
 #Train test split (validation does nothing here)
 X_dev, X_test, y_dev, y_test = train_test_split(
@@ -126,12 +153,52 @@ for pkl in MODEL_FILES:
         plt.tight_layout(); plt.savefig(OUTDIR / f"{tag}_bar.png", dpi=200); plt.close()
 
     else:
-        # SVM / KNN / MLP / Voting / Stacking → model-agnostic KernelExplainer
+        # --- PATCH 2: robust positive-class scorer for KernelExplainer
         def predict_pos(nd):
             df_ = pd.DataFrame(nd, columns=feat_names)
+
+            # Prefer probabilities if available
             if hasattr(model, "predict_proba"):
-                return model.predict_proba(df_)[:, POS_CLASS_INDEX]
-            return model.decision_function(df_)
+                proba = np.asarray(model.predict_proba(df_))
+
+                # (n,) already positive-class probs
+                if proba.ndim == 1:
+                    return proba
+
+                # (n,1) squeeze to (n,)
+                if proba.ndim == 2 and proba.shape[1] == 1:
+                    return proba[:, 0]
+
+                # (n,2) or more → choose column for class "1" when known
+                pos_idx = None
+                if hasattr(model, "classes_"):
+                    try:
+                        pos_idx = int(np.where(model.classes_ == 1)[0][0])
+                    except Exception:
+                        pos_idx = None
+                if pos_idx is None:
+                    pos_idx = POS_CLASS_INDEX  # fallback
+                return proba[:, pos_idx]
+
+            # Fall back to decision_function → map to (0,1) with sigmoid
+            if hasattr(model, "decision_function"):
+                margin = np.asarray(model.decision_function(df_))
+                if margin.ndim == 1:
+                    return 1.0 / (1.0 + np.exp(-margin))
+                pos_idx = None
+                if hasattr(model, "classes_"):
+                    try:
+                        pos_idx = int(np.where(model.classes_ == 1)[0][0])
+                    except Exception:
+                        pos_idx = None
+                if pos_idx is None:
+                    pos_idx = POS_CLASS_INDEX
+                return 1.0 / (1.0 + np.exp(-margin[:, pos_idx]))
+
+            # Last resort: use predicted labels as float
+            return np.asarray(model.predict(df_), dtype=float)
+        # --- END PATCH 2
+
 
         explainer = shap.KernelExplainer(predict_pos, X_bg)
         shap_vals = explainer.shap_values(X_sample, nsamples="auto", l1_reg="aic")
