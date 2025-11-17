@@ -10,7 +10,7 @@ from sklearn.ensemble import (
     RandomForestClassifier, GradientBoostingClassifier,
     VotingClassifier, StackingClassifier
 )
-from sklearn.metrics import roc_auc_score, confusion_matrix, f1_score
+from sklearn.metrics import roc_auc_score, confusion_matrix, f1_score, make_scorer
 from sklearn.svm import SVC
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
@@ -28,9 +28,15 @@ from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.optimizers import Adam
 
 
-def create_mlp_model(input_dim=20, hidden_layers=[64, 32], dropout_rate=0.2, learning_rate=0.001):
+def create_mlp_model(
+    input_dim=20,
+    num_classes=3,
+    hidden_layers=[64, 32],
+    dropout_rate=0.2,
+    learning_rate=0.001
+):
     model = Sequential()
-    model.add(Input(shape=(input_dim,)))
+    model.add(Input(shape=(input_dim,))) #model will end with  3 dimensional output instead of 1
     model.add(Dense(hidden_layers[0], activation='relu'))
     model.add(Dropout(dropout_rate))
 
@@ -38,8 +44,18 @@ def create_mlp_model(input_dim=20, hidden_layers=[64, 32], dropout_rate=0.2, lea
         model.add(Dense(units, activation='relu'))
         model.add(Dropout(dropout_rate))
 
-    model.add(Dense(1, activation='sigmoid'))
-    model.compile(optimizer=Adam(learning_rate=learning_rate),loss='binary_crossentropy',metrics=[tf.keras.metrics.AUC(name='auc')]) #uses AUC as the only reliable training metric (there is no f1-score metric built in)
+    # multiclass output
+    model.add(Dense(num_classes, activation='softmax')) 
+    
+    #softmax: turns raw scores (logits) into a probability distribution over the 3 classes:
+    #Each output is in (0,1).
+    #All outputs sum to 1.
+
+    model.compile(
+        optimizer=Adam(learning_rate=learning_rate),
+        loss='sparse_categorical_crossentropy', #expects the 0,1,2
+        metrics=['accuracy'] #accuracy is a good sanity metric during training since there is no f1-score built in
+    )
     return model
 
 
@@ -51,7 +67,7 @@ models = {
     'knn': KNeighborsClassifier(),
     'lr': LogisticRegression(),
     'gb': GradientBoostingClassifier(),
-    'xgb': XGBClassifier()
+    'xgb': XGBClassifier(objective="multi:softprob",num_class=3,eval_metric="mlogloss")
 }
 
 param_grids = {
@@ -86,15 +102,19 @@ rfe_base_models = {
     'rf': RandomForestClassifier(),
     'svm': SVC(kernel='linear')
 }
+
+f1_weighted_scorer = make_scorer(f1_score, average='weighted')
+
+
 #Load dataset
-data = pd.read_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\Hypertension\all_data_samples\merged_hypertensive_dataset.csv", dtype=str)
+data = pd.read_csv(r"C:\Users\Rafael Fonseca\Desktop\Mestrado\Ano2\ProjetoMestrado\parte_2\data\Hypertension\multi-label\all_data_samples\merged_hypertensive_dataset_multiclass.csv", dtype=str)
 
 # Drop ID column (not useful for modeling)
 data.drop(columns=["sample_id"], inplace=True)
 
-# Convert all columns except 'healthy' to numeric
+# Convert all columns except 'bp_class' to numeric
 for col in data.columns:
-    if col not in ['healthy']:
+    if col not in ['bp_class']:
         data[col] = pd.to_numeric(data[col], errors='coerce')
 
 # Drop rows with any missing values after conversion
@@ -107,8 +127,8 @@ data = data.sample(frac=1, random_state=42).reset_index(drop=True)
 # --- Split data into training, validation, and test sets ---
 
 # Separate features and target
-X = data.drop(columns=['healthy'])
-y = data['healthy'].astype(int)
+X = data.drop(columns=['bp_class'])
+y = data['bp_class'].astype(int)
 
 # Step 1: Split off 20% for final test set  -- dev = 60% of training + 20% of validation
 X_dev, X_test, y_dev, y_test = train_test_split(
@@ -120,37 +140,48 @@ X_train, X_val, y_train, y_val = train_test_split(
     X_dev, y_dev, test_size=0.25, stratify=y_dev, random_state=42
 )
 
-
 #Recombine X_train and y_train into one DataFrame for clarity
 # --- Recombine X_train and y_train for upsampling ---
 train_df = X_train.copy()
-train_df['healthy'] = y_train
+train_df['bp_class'] = y_train
 
 # --- Apply RANDOM UPSAMPLING to balance the training set only ---
+# --- Apply RANDOM UPSAMPLING to balance the training set only ---
 
-# Separate majority and minority classes
-df_majority = train_df[train_df['healthy'] == 0]
-df_minority = train_df[train_df['healthy'] == 1]
+label_col = 'bp_class'
 
-# Upsample minority class
-df_minority_upsampled = resample(
-    df_minority,
-    replace=True,                  # sample with replacement
-    n_samples=len(df_majority),    # match majority class
-    random_state=42
-)
+# Class distribution in the original training set
+class_counts = train_df[label_col].value_counts()
+max_count = class_counts.max()
 
-# Combine majority and upsampled minority
-train_df_upsampled = pd.concat([df_majority, df_minority_upsampled])
+upsampled_parts = []
+
+# For each class, upsample to match the majority class size
+for cls, count in class_counts.items():
+    cls_df = train_df[train_df[label_col] == cls]
+    
+    if count < max_count:
+        # Upsample this class
+        cls_upsampled = resample(
+            cls_df,
+            replace=True,
+            n_samples=max_count,
+            random_state=42
+        )
+        upsampled_parts.append(cls_upsampled)
+    else:
+        # Majority class: keep as is
+        upsampled_parts.append(cls_df)
+
+# Combine all upsampled class subsets
+train_df_upsampled = pd.concat(upsampled_parts, ignore_index=True)
 
 # Shuffle the resulting DataFrame
 train_df_upsampled = train_df_upsampled.sample(frac=1, random_state=42).reset_index(drop=True)
 
 # Re-separate features and target
-X_train = train_df_upsampled.drop(columns=['healthy'])
-y_train = train_df_upsampled['healthy']
-
-
+X_train = train_df_upsampled.drop(columns=[label_col])
+y_train = train_df_upsampled[label_col]
 
 # --- Scale data using both scalers (standard, minmax) ---
 best_performers = {}
@@ -184,9 +215,10 @@ for scaler_name, scaler in scalers.items():
             estimator=base_model,
             step=1,
             cv=3,
-            scoring='roc_auc',
+            scoring=f1_weighted_scorer,
             n_jobs=-1
         )
+
         rfecv.fit(X_train_processed, y_train)
         #Take the smallest number between 20 and the number of features the RFECV found
         #with our GOAL - classify the microbiome. if K (number of features) is too high there is no way we can classify the microbiome
@@ -230,9 +262,11 @@ for scaler_name, scaler in scalers.items():
 
             # --- MLP requires fixed-size input vectors so adding it at the beginning of the code (before capping it to 20) would lead to shape mismatch and a poorly trained model---
             models['mlp'] = KerasClassifier(
-            model=create_mlp_model,
-            model__input_dim=X_train_selected.shape[1], #number of features
-            verbose=0)
+                model=create_mlp_model,
+                model__input_dim=X_train_selected.shape[1],
+                model__num_classes=len(np.unique(y_train)),
+                verbose=0
+            )
 
             # --- Train base models with GridSearchCV and store best estimators ---
             best_estimators = {}
@@ -248,23 +282,31 @@ for scaler_name, scaler in scalers.items():
 
                 grid = GridSearchCV(
                     estimator=model,
-                    param_grid=grid_params, #uses the deep_copied params
+                    param_grid=grid_params,
                     cv=3,
-                    scoring='roc_auc',
+                    scoring=f1_weighted_scorer,
                     n_jobs=-1
                 )
+
                 grid.fit(X_train_selected, y_train)
 
                 #evaluates base models on validation set
                 y_val_pred = grid.predict(X_val_selected)
-                val_f1 = f1_score(y_val, y_val_pred)
+                val_f1 = f1_score(y_val, y_val_pred, average='weighted')
                 val_auc = None
                 if hasattr(grid, "predict_proba"):
-                    val_pred_proba = grid.predict_proba(X_val_selected)[:, 1]
+                    # full (N, n_classes) probability matrix
+                    val_pred_proba = grid.predict_proba(X_val_selected)
                     try:
-                        val_auc = roc_auc_score(y_val, val_pred_proba)
+                        val_auc = roc_auc_score(
+                            y_val,
+                            val_pred_proba,
+                            multi_class='ovr',
+                            average='weighted'
+                        )
                     except ValueError:
                         val_auc = None
+
 
 
                 label = f"Single-{name}"
@@ -296,12 +338,17 @@ for scaler_name, scaler in scalers.items():
                             )
                             voting_model.fit(X_train_selected, y_train)
                             y_pred = voting_model.predict(X_val_selected)
-                            val_f1 = f1_score(y_val, y_pred)
+                            val_f1 = f1_score(y_val, y_pred, average='weighted')
                             val_auc = None
                             if hasattr(voting_model, "predict_proba"):
-                                val_pred_proba = voting_model.predict_proba(X_val_selected)[:, 1]
+                                val_pred_proba = voting_model.predict_proba(X_val_selected)
                                 try:
-                                    val_auc = roc_auc_score(y_val, val_pred_proba)
+                                    val_auc = roc_auc_score(
+                                        y_val,
+                                        val_pred_proba,
+                                        multi_class='ovr',
+                                        average='weighted'
+                                    )
                                 except ValueError:
                                     val_auc = None
 
@@ -327,14 +374,20 @@ for scaler_name, scaler in scalers.items():
                           )
                           stacking_model.fit(X_train_selected, y_train)
                           y_pred = stacking_model.predict(X_val_selected)
-                          val_f1 = f1_score(y_val, y_pred)
+                          val_f1 = f1_score(y_val, y_pred, average='weighted')
                           val_auc = None
                           if hasattr(stacking_model, "predict_proba"):
-                            val_pred_proba =  stacking_model.predict_proba(X_val_selected)[:, 1]
+                            val_pred_proba = stacking_model.predict_proba(X_val_selected)
                             try:
-                                val_auc = roc_auc_score(y_val, val_pred_proba) 
+                                val_auc = roc_auc_score(
+                                    y_val,
+                                    val_pred_proba,
+                                    multi_class='ovr',
+                                    average='weighted'
+                                )
                             except ValueError:
                                 val_auc = None
+
 
                           label = f"Stacking-{meta_name}-{combo}"
                           stacking_results[label] = {
@@ -417,16 +470,23 @@ X_test_final = X_test_proc.loc[:, features] #Select columns by label (not by imp
 
 # Predict
 test_pred = model.predict(X_test_final)
-test_f1 = f1_score(y_test, test_pred)
+test_f1 = f1_score(y_test, test_pred, average='weighted')
 
 test_auc = None
 test_pred_proba = None
 if hasattr(model, "predict_proba"):
-    test_pred_proba = model.predict_proba(X_test_final)[:, 1]
+    # full (N, n_classes) probability matrix
+    test_pred_proba = model.predict_proba(X_test_final)
     try:
-        test_auc = roc_auc_score(y_test, test_pred_proba)
+        test_auc = roc_auc_score(
+            y_test,
+            test_pred_proba,
+            multi_class='ovr',
+            average='weighted'
+        )
     except ValueError:
         test_auc = None
+
 
 
 # Print summary
@@ -438,15 +498,15 @@ print(f"Validation AUC: {best_model_pipeline['val_auc']:.3f}")
 print(f"Test F1-score      : {test_f1:.3f}")
 if test_auc is not None:
     print(f"Test AUC           : {test_auc:.3f}")
-print("Model saved to     : 'hypertension_best_model_upsampling.pkl'")
+print("Model saved to     : 'hypertension_multi_class_best_model_upsampling.pkl'")
 print("=" * 40)
 
 # Confusion matrix
-cm = confusion_matrix(y_test, test_pred)
+cm = confusion_matrix(y_test, test_pred, labels=[0, 1, 2])
 cm_df = pd.DataFrame(
     cm,
-    index=["Actual Healthy", "Actual Hypertensive"],
-    columns=["Predicted Healthy", "Predicted Hypertensive"]
+    index=["Actual Healthy", "Actual Prehypertensive", "Actual Hypertensive"],
+    columns=["Pred Healthy", "Pred Prehypertensive", "Pred Hypertensive"]
 )
 sns.heatmap(cm_df, annot=True, fmt="d", cmap="Blues")
 plt.title("Confusion Matrix")
@@ -454,7 +514,8 @@ plt.ylabel("Actual")
 plt.xlabel("Predicted")
 plt.show()
 
+
 # Save
 best_model_pipeline['test_auc'] = test_auc
 best_model_pipeline['test_f1'] = test_f1
-joblib.dump(best_model_pipeline, 'hypertension_best_model_upsampling.pkl')
+joblib.dump(best_model_pipeline, 'hypertension_multi_class_best_model_upsampling.pkl')
