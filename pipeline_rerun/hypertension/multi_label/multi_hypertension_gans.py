@@ -101,9 +101,21 @@ best_estimators_final = {}
 rfe_base_models = {
     'lr': LogisticRegression(max_iter=10000),
     'rf': RandomForestClassifier(),
-    'svm': SVC(kernel='linear')
+    'svm': SVC(kernel='linear', probability=True)
 }
 
+# Multi-class AUC scorer (One-vs-Rest, weighted by support)
+def multiclass_roc_auc(y_true, y_proba):
+    return roc_auc_score(
+        y_true,
+        y_proba,
+        multi_class='ovr',
+        average='weighted'
+    )
+
+auc_weighted_scorer = make_scorer(multiclass_roc_auc, needs_proba=True)
+
+# Multi-class F1 scorer (weighted, to respect imbalance)
 f1_weighted_scorer = make_scorer(f1_score, average='weighted')
 
 #Load dataset
@@ -216,7 +228,7 @@ for scaler_name, scaler in scalers.items():
             estimator=base_model,
             step=1,
             cv=3,
-            scoring=f1_weighted_scorer,
+            scoring=auc_weighted_scorer,
             n_jobs=-1
         )
 
@@ -285,7 +297,7 @@ for scaler_name, scaler in scalers.items():
                     estimator=model,
                     param_grid=grid_params,
                     cv=3,
-                    scoring=f1_weighted_scorer,
+                    scoring=auc_weighted_scorer,
                     n_jobs=-1
                 )
 
